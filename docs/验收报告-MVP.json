@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-11T03:53:29.099Z",
+  "date": "2026-11-11T04:26:12.695Z",
   "version": "MVP 0.1.0",
   "results": [
     {
@@ -30,13 +30,13 @@
       "id": "S6",
       "name": "外部进程存活（停止仅限会话进程）",
       "pass": true,
-      "detail": "extPid=6720"
+      "detail": "extPid=20176"
     },
     {
       "id": "S3",
       "name": "端口占用检测",
       "pass": true,
-      "detail": "[{\"service\":\"java-backend\",\"port\":8080,\"occupied\":false},{\"service\":\"echo-accept\",\"port\":18897,\"occupied\":false},{\"service\":\"echo-accept-1794324858512\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794366086610\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794367466896\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794369173704\",\"port\":18899,\"occupied\":true}]"
+      "detail": "[{\"service\":\"java-backend\",\"port\":8080,\"occupied\":false},{\"service\":\"echo-accept\",\"port\":18897,\"occupied\":false},{\"service\":\"echo-accept-1794324858512\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794366086610\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794367466896\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794369173704\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794370583535\",\"port\":18899,\"occupied\":true},{\"service\":\"shared-echo-1794370618836\",\"port\":18913,\"occupied\":false},{\"service\":\"echo-accept-1794370733256\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794371023802\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794371119762\",\"port\":18899,\"occupied\":true}]"
     },
     {
       "id": "S4",
@@ -73,17 +73,28 @@
       "name": "审计记录存在且无明文密钥泄漏",
       "pass": true,
       "detail": "50 条"
+    },
+    {
+      "id": "S13",
+      "name": "共享服务引用保护（双项目 fixture）",
+      "pass": true,
+      "detail": "stopA=false(shared service shared-echo-1794371170847 referenced by 1 oth) stopB=true"
+    },
+    {
+      "id": "S13b",
+      "name": "跨设备迁移路径重映射",
+      "pass": true,
+      "detail": "remapped=true services=15"
     }
   ],
   "summary": {
-    "total": 12,
-    "pass": 12,
+    "total": 14,
+    "pass": 14,
     "failed": 0
   },
   "skipped": [
     "S4-Node-pnpm 识别变体（同 S1 机制）",
     "S12 自动修复 LLM 全链路（待 DeepSeek API Key）",
-    "S13 共享服务引用保护（机制已实现 stopService otherRefs，需多项目 fixture）",
     "S14 Git 操作保护（Git 模块属第二阶段）",
     "S16 插件不兼容阻止（插件系统属第三阶段）",
     "S20 异常退出恢复（需 kill -9 后端实测，建议人工执行）"
