@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-11T08:28:18.301Z",
+  "date": "2026-11-11T08:49:41.778Z",
   "version": "MVP 0.1.0",
   "results": [
     {
@@ -12,7 +12,7 @@
       "id": "S9",
       "name": "SQLite schema 版本化迁移",
       "pass": true,
-      "detail": "v6"
+      "detail": "v7"
     },
     {
       "id": "S1",
@@ -30,13 +30,13 @@
       "id": "S6",
       "name": "外部进程存活（停止仅限会话进程）",
       "pass": true,
-      "detail": "extPid=2732"
+      "detail": "extPid=19276"
     },
     {
       "id": "S3",
       "name": "端口占用检测",
       "pass": true,
-      "detail": "[{\"service\":\"java-backend\",\"port\":8080,\"occupied\":false},{\"service\":\"echo-accept\",\"port\":18897,\"occupied\":false},{\"service\":\"echo-accept-1794324858512\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794366086610\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794367466896\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794369173704\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794370583535\",\"port\":18899,\"occupied\":true},{\"service\":\"shared-echo-1794370618836\",\"port\":18913,\"occupied\":false},{\"service\":\"echo-accept-1794370733256\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794371023802\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794371119762\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794371854393\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794378678407\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794381188300\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794382186014\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794382265542\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794382340384\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794383362210\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794385638003\",\"port\":18899,\"occupied\":true}]"
+      "detail": "[{\"service\":\"java-backend\",\"port\":8080,\"occupied\":false},{\"service\":\"echo-accept\",\"port\":18897,\"occupied\":false},{\"service\":\"echo-accept-1794324858512\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794366086610\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794367466896\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794369173704\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794370583535\",\"port\":18899,\"occupied\":true},{\"service\":\"shared-echo-1794370618836\",\"port\":18913,\"occupied\":false},{\"service\":\"echo-accept-1794370733256\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794371023802\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794371119762\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794371854393\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794378678407\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794381188300\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794382186014\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794382265542\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794382340384\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794383362210\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794385638003\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794386920053\",\"port\":18899,\"occupied\":true}]"
     },
     {
       "id": "S4",
@@ -78,13 +78,13 @@
       "id": "S13",
       "name": "共享服务引用保护（双项目 fixture）",
       "pass": true,
-      "detail": "stopA=false(shared service shared-echo-1794385696448 referenced by 1 oth) stopB=true"
+      "detail": "stopA=false(shared service shared-echo-1794386979901 referenced by 1 oth) stopB=true"
     },
     {
       "id": "S13b",
       "name": "跨设备迁移路径重映射",
       "pass": true,
-      "detail": "remapped=true services=31"
+      "detail": "remapped=true services=34"
     }
   ],
   "summary": {

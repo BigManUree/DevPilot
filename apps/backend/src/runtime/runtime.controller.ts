@@ -10,6 +10,12 @@ export class RuntimeController {
     return this.svc.startService(serviceId);
   }
 
+  /** 设置服务自动重启策略：off | on-failure（有限 3 次） */
+  @Post('services/:serviceId/policy')
+  setPolicy(@Param('serviceId') serviceId: string, @Body() body: { policy: 'off' | 'on-failure' }) {
+    return this.svc.setRestartPolicy(serviceId, body?.policy === 'on-failure' ? 'on-failure' : 'off');
+  }
+
   @Post('services/:serviceId/stop')
   stopService(@Param('serviceId') serviceId: string, @Body() body: { force?: boolean }) {
     return this.svc.stopService(serviceId, body?.force === true);

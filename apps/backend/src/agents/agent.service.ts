@@ -151,6 +151,24 @@ export class AgentService implements OnModuleInit {
     }
   }
 
+  /**
+   * 外部主体（MCP 客户端等）触发执行：走审批双门（PRD"所有身份经统一权限系统"）。
+   * permissions 表无 external:mcp-client 的 task.run 授权时自动创建 approval（pending），
+   * 用户在审批中心 approve 后重试即放行。
+   */
+  runExternal(taskId: string): { started?: boolean; taskId?: string; pendingApproval?: boolean; approvalId?: string; reason?: string } {
+    const task = this.ds.db.prepare('SELECT id, status FROM tasks WHERE id = ?').get(taskId) as { id: string; status: string } | undefined;
+    if (!task) throw new NotFoundException(`任务不存在：${taskId}`);
+    const check = this.perms.check({ subjectType: 'external', subjectId: 'mcp-client', category: 'task.run' });
+    if (!check.allowed) {
+      this.audit.record({ subject: 'external:mcp-client', action: 'task.run-external', target: taskId, result: 'denied', detail: { approvalId: check.approvalId } });
+      return { pendingApproval: true, approvalId: check.approvalId, reason: check.reason };
+    }
+    void this.runTask(taskId).catch(() => {});
+    this.audit.record({ subject: 'external:mcp-client', action: 'task.run-external', target: taskId, result: 'ok' });
+    return { started: true, taskId };
+  }
+
   /** Supervisor 主流程：规划 → 顺序执行 → 汇总 */
   async runTask(taskId: string): Promise<{ status: string; plan?: TaskPlan; results?: unknown; blocked?: unknown; question?: string }> {
     const task = this.ds.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as

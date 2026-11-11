@@ -51,6 +51,15 @@ const TOOLS = [
     },
   },
   {
+    name: 'devpilot.task.run',
+    description: '外部触发执行一个已创建的任务。首次调用会生成待审批记录（返回 approvalId），用户在 DevPilot 审批中心批准后重试即执行',
+    inputSchema: {
+      type: 'object',
+      properties: { taskId: { type: 'string', description: '任务 ID' } },
+      required: ['taskId'],
+    },
+  },
+  {
     name: 'devpilot.services',
     description: '列出服务运行状态（名称/状态/端口）',
     inputSchema: { type: 'object', properties: {} },
@@ -91,6 +100,11 @@ async function callTool(name, args) {
         await fetch(`${API}/tasks/${created.taskId}/run`, { method: 'POST' }).catch(() => {});
       }
       return created;
+    }
+    case 'devpilot.task.run': {
+      const r = await fetch(`${API}/tasks/${args.taskId}/run-external`, { method: 'POST' });
+      if (!r.ok) throw new Error(`upstream ${r.status}`);
+      return r.json();
     }
     case 'devpilot.services': {
       const rows = await apiGet('/services/status');

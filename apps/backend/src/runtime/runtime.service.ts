@@ -6,6 +6,7 @@ import { DatabaseService } from '../database/database.module';
 import { AuditService } from '../permissions/audit.service';
 import { EventsGateway } from '../events.gateway';
 import { LogService } from '../logs/log.service';
+import { NotificationService } from '../notifications/notification.service';
 import type { ServiceStatus } from '@devpilot/shared-types';
 import { platform as plat } from '@devpilot/platform-adapters';
 
@@ -32,6 +33,7 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     private readonly audit: AuditService,
     private readonly events: EventsGateway,
     private readonly logs: LogService,
+    private readonly notify: NotificationService,
   ) {}
 
   onApplicationShutdown() {
@@ -146,6 +148,8 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
         this.setStatus(serviceId, code === 0 ? 'Stopped' : 'Failed');
         this.broadcastServiceEvent(serviceId, svc.project_id);
         this.logs.log({ level: code === 0 ? 'info' : 'error', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: `service exited code=${code}` });
+        // 自愈：on-failure 策略下自动重启，最多 3 次（PRD 3.9 有限且可配置，不允许无限重启）
+        if (code !== 0) void this.maybeAutoRestart(serviceId, svc);
       }
     });
 
@@ -269,6 +273,38 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       };
       attempt();
     });
+  }
+
+  /** 崩溃自动重启：策略 on-failure 且本后端周期内重启次数 < 3（上限写死，防风暴） */
+  private static readonly MAX_AUTO_RESTARTS = 3;
+  private restartCounts = new Map<string, number>();
+
+  private async maybeAutoRestart(serviceId: string, svc: { id: string; name: string; project_id: string }): Promise<void> {
+    const row = this.ds.db.prepare('SELECT restart_policy FROM project_services WHERE id = ?').get(serviceId) as { restart_policy?: string } | undefined;
+    if (!row || row.restart_policy !== 'on-failure') return;
+    const count = (this.restartCounts.get(serviceId) ?? 0) + 1;
+    if (count > RuntimeService.MAX_AUTO_RESTARTS) {
+      this.notify.create({ type: 'service.restart.exhausted', title: `服务 ${svc.name} 自动重启已达上限（3 次）`, content: '请人工排查后手动启动；重启计数在后端重启或手动 start/stop 后清零', priority: 2 });
+      this.logs.log({ level: 'error', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: 'auto-restart limit reached (3), giving up' });
+      return;
+    }
+    this.restartCounts.set(serviceId, count);
+    this.logs.log({ level: 'warn', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: `auto-restarting (${count}/3) after crash` });
+    this.notify.create({ type: 'service.restarted', title: `服务 ${svc.name} 崩溃，已自动重启（${count}/3）`, priority: 3 });
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      await this.startService(serviceId);
+    } catch (e) {
+      this.logs.log({ level: 'error', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: `auto-restart failed: ${String(e).slice(0, 120)}` });
+    }
+  }
+
+  /** 设置自动重启策略：off | on-failure */
+  setRestartPolicy(serviceId: string, policy: 'off' | 'on-failure'): { serviceId: string; restartPolicy: string } {
+    const r = this.ds.db.prepare('UPDATE project_services SET restart_policy=? WHERE id=?').run(policy, serviceId);
+    if (r.changes === 0) throw new Error('service not found');
+    if (policy === 'off') this.restartCounts.delete(serviceId);
+    return { serviceId, restartPolicy: policy };
   }
 
   /** 平台进程树终止：按 PID，不按名称（实现收敛到 platform-adapters） */

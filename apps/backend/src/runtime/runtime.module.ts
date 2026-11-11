@@ -4,9 +4,10 @@ import { RuntimeController } from './runtime.controller';
 import { PermissionsModule } from '../permissions/permissions.module';
 import { EventsModule } from '../events.module';
 import { LogsModule } from '../logs/logs.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
-  imports: [PermissionsModule, EventsModule, LogsModule],
+  imports: [PermissionsModule, EventsModule, LogsModule, NotificationsModule],
   providers: [RuntimeService],
   controllers: [RuntimeController],
   exports: [RuntimeService],

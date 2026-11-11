@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, NotFoundException } from '@nestjs/common';
 import { ModelService } from './model.service';
 import { AgentService } from './agent.service';
 
@@ -40,6 +40,17 @@ export class AgentController {
   @Post('tasks')
   createTask(@Body() body: { goal: string; projectId?: string }) {
     return this.agents.createTask(body);
+  }
+
+  /** 外部主体（MCP 等）触发执行：审批双门，pending 时返回 approvalId 供审批中心处理 */
+  @Post('tasks/:taskId/run-external')
+  runExternal(@Param('taskId') taskId: string) {
+    try {
+      return this.agents.runExternal(taskId);
+    } catch (err) {
+      if (err instanceof NotFoundException) throw err;
+      return { started: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   @Post('tasks/:taskId/run')

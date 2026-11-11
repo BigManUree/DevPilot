@@ -48,6 +48,11 @@ const readline = require('node:readline');
   const c = created ? JSON.parse(created.result.content[0].text) : {};
   console.log('5 task.create:', c.taskId ? 'taskId=' + c.taskId.slice(0, 8) : JSON.stringify(c).slice(0, 100));
 
+  mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'devpilot.task.run', arguments: { taskId: c.taskId } } }) + '\n');
+  const run = await waitResponse(7);
+  const runBody = run ? JSON.parse(run.result.content[0].text) : {};
+  console.log('7 task.run（外部触发）:', runBody.pendingApproval ? `pendingApproval=true approvalId=${runBody.approvalId.slice(0, 8)}` : JSON.stringify(runBody).slice(0, 100));
+
   mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'devpilot.unknown', arguments: {} } }) + '\n');
   const err = await waitResponse(6);
   console.log('6 unknown tool:', err ? `error.code=${err.error.code} msg=${err.error.message.slice(0, 50)}` : 'TIMEOUT');

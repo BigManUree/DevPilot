@@ -456,7 +456,16 @@ const V6: Migration = {
   },
 };
 
-export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5, V6];
+/** V7：服务自动重启策略（第三阶段自愈第一批，PRD 3.9 有限且可配置） */
+const V7: Migration = {
+  version: 7,
+  name: 'service-restart-policy',
+  up: (db) => {
+    db.exec(`ALTER TABLE project_services ADD COLUMN restart_policy TEXT NOT NULL DEFAULT 'off';`);
+  },
+};
+
+export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5, V6, V7];
 
 export function openDatabase(dataDir: string): Database.Database {
   fs.mkdirSync(dataDir, { recursive: true });
