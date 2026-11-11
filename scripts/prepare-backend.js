@@ -28,11 +28,32 @@ const sqliteDir = (() => {
   return base;
 })();
 if (sqliteDir) {
-  // deploy 目录内无 prebuild-install；从 workspace 已构建的 better-sqlite3 拷原生二进制（同版本同 ABI）
+  // deploy 目录内无 prebuild-install；先拷 workspace 的 Node22 ABI 二进制兜底，
+  // 再下载 Electron ABI prebuild 覆盖——打包态 electron-as-node 要求 NODE_MODULE_VERSION 130
   const src = path.join(root, 'apps', 'backend', 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
   fs.mkdirSync(path.dirname(path.join(sqliteDir, 'build', 'Release', 'better_sqlite3.node')), { recursive: true });
   fs.copyFileSync(src, path.join(sqliteDir, 'build', 'Release', 'better_sqlite3.node'));
-  console.log('copied better_sqlite3.node from workspace build');
+  console.log('copied better_sqlite3.node from workspace build (node ABI)');
+}
+
+// Electron ABI 原生件：better-sqlite3 官方 prebuild（github 直连超时走 npmmirror 镜像）
+const electronVer = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(root, 'apps', 'desktop', 'node_modules', 'electron', 'package.json'), 'utf-8')).version; } catch { return null; }
+})();
+if (electronVer) {
+  const bsDir = path.join(out, 'node_modules', 'better-sqlite3');
+  try {
+    // 网络抖动可能首连超时，重试一次（二次通常命中本地 prebuilds 缓存）
+    const run = () => execSync(`npx -y prebuild-install -r electron -t ${electronVer} --verbose`, {
+      cwd: bsDir,
+      stdio: 'inherit',
+      env: { ...process.env, npm_config_better_sqlite3_binary_host_mirror: 'https://npmmirror.com/mirrors/better-sqlite3' },
+    });
+    try { run(); } catch { run(); }
+    console.log(`better-sqlite3 replaced with electron@${electronVer} (ABI 130) prebuild`);
+  } catch (e) {
+    console.warn('WARN: electron prebuild install failed — packaged backend may hit NODE_MODULE_VERSION mismatch');
+  }
 }
 const check = `const D=require('better-sqlite3');new D(':memory:');
 const s=require('@devpilot/shared-types');

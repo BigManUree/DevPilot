@@ -24,3 +24,8 @@ tests/fixtures/git-demo/
 
 # 验收脚本运行产物
 tests/fixtures/.devpilot-backup/
+
+# electron-builder 打包产物
+apps/desktop/release/
+apps/desktop/release2/
+apps/desktop/resources-backend/
