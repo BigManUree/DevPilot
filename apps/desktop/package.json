@@ -1,0 +1,58 @@
+{
+  "name": "@devpilot/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main.js",
+  "description": "DevPilot local AI project workbench",
+  "author": {
+    "name": "devpilot"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "npm run build && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
+    "start": "electron .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pack": "pnpm run build && node ../../scripts/prepare-backend.js && electron-builder --win"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.0"
+  },
+  "build": {
+    "appId": "com.devpilot.desktop",
+    "productName": "DevPilot",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources-backend",
+        "to": "backend"
+      },
+      {
+        "from": "../renderer/dist",
+        "to": "renderer/dist"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    }
+  }
+}

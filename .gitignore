@@ -1,0 +1,23 @@
+node_modules/
+dist/
+out/
+build/
+*.tsbuildinfo
+.env
+.env.local
+*.log
+*.log.err
+data/
+coverage/
+.DS_Store
+Thumbs.db
+
+# lockfile 备份与文档解包产物
+pnpm-lock.yaml.bak
+docs/_extracted/
+
+# 本地运行残留
+*.pid
+
+# git 功能测试夹具（内嵌 .git 的本地仓库，不作为 submodule 提交）
+tests/fixtures/git-demo/

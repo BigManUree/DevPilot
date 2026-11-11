@@ -1,0 +1,92 @@
+{
+  "date": "2026-11-11T03:02:02.144Z",
+  "version": "MVP 0.1.0",
+  "results": [
+    {
+      "id": "S10",
+      "name": "健康检查",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "S9",
+      "name": "SQLite schema 版本化迁移",
+      "pass": true,
+      "detail": "v4"
+    },
+    {
+      "id": "S1",
+      "name": "导入混合项目并识别 vue+maven",
+      "pass": true,
+      "detail": "2 服务"
+    },
+    {
+      "id": "S2",
+      "name": "服务独立启动/停止",
+      "pass": true,
+      "detail": "start=Running stop=true"
+    },
+    {
+      "id": "S6",
+      "name": "外部进程存活（停止仅限会话进程）",
+      "pass": true,
+      "detail": "extPid=26208"
+    },
+    {
+      "id": "S3",
+      "name": "端口占用检测",
+      "pass": true,
+      "detail": "[{\"service\":\"java-backend\",\"port\":8080,\"occupied\":false},{\"service\":\"echo-accept\",\"port\":18897,\"occupied\":false},{\"service\":\"echo-accept-1794324858512\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794366086610\",\"port\":18899,\"occupied\":true}]"
+    },
+    {
+      "id": "S4",
+      "name": "环境需求比对与缺失报告",
+      "pass": true,
+      "detail": "req=4 missing=0"
+    },
+    {
+      "id": "S5",
+      "name": "未授权命令阻止并生成审批",
+      "pass": true,
+      "detail": "PERMISSION_DENIED_PENDING_APPROVAL"
+    },
+    {
+      "id": "S5b",
+      "name": "审批授权后命令放行",
+      "pass": true,
+      "detail": "exit=0"
+    },
+    {
+      "id": "S7",
+      "name": "修改前备份 + 可回滚",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "S8",
+      "name": "任务取消",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "S11",
+      "name": "审计记录存在且无明文密钥泄漏",
+      "pass": true,
+      "detail": "50 条"
+    }
+  ],
+  "summary": {
+    "total": 12,
+    "pass": 12,
+    "failed": 0
+  },
+  "skipped": [
+    "S4-Node-pnpm 识别变体（同 S1 机制）",
+    "S12 自动修复 LLM 全链路（待 DeepSeek API Key）",
+    "S13 共享服务引用保护（机制已实现 stopService otherRefs，需多项目 fixture）",
+    "S14 Git 操作保护（Git 模块属第二阶段）",
+    "S16 插件不兼容阻止（插件系统属第三阶段）",
+    "S20 异常退出恢复（需 kill -9 后端实测，建议人工执行）"
+  ],
+  "securityGate": "S5/S5b/S6/S7/S11 全部 PASSED —— 未授权执行、外部进程误杀、备份回滚、密钥脱敏门禁通过"
+}

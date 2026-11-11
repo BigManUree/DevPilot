@@ -1,0 +1,19 @@
+{
+  "name": "devpilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DevPilot - local-first AI project management & agent workbench",
+  "packageManager": "pnpm@12.15.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r run build",
+    "dev:backend": "pnpm --filter @devpilot/backend run start:dev",
+    "dev:desktop": "pnpm --filter @devpilot/desktop run dev",
+    "dev:renderer": "pnpm --filter @devpilot/renderer run dev",
+    "lint": "pnpm -r run lint",
+    "test": "pnpm -r run test",
+    "typecheck": "pnpm -r run typecheck"
+  }
+}
