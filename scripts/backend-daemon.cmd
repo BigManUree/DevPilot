@@ -8,6 +8,9 @@ cd /d "%~dp0\..\apps\backend"
 set "http_proxy="
 set "https_proxy="
 
+rem Idempotent restart: kill any existing listener on 37100 (ignore errors)
+powershell -NoProfile -Command "try { $c = Get-NetTCPConnection -LocalPort 37100 -State Listen -ErrorAction Stop; Stop-Process -Id $c[0].OwningProcess -Force -Confirm:$false } catch {}"
+
 set "LOGDIR=%APPDATA%\devpilot\data\logs"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 

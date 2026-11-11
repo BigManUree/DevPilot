@@ -55,4 +55,19 @@ export class AgentController {
   cancelTask(@Param('taskId') taskId: string) {
     return this.agents.cancelTask(taskId);
   }
+
+  @Post('tasks/:taskId/pause')
+  pauseTask(@Param('taskId') taskId: string) {
+    return this.agents.pauseTask(taskId);
+  }
+
+  @Post('tasks/:taskId/resume')
+  resumeTask(@Param('taskId') taskId: string) {
+    return this.agents.resumeTask(taskId);
+  }
+
+  @Post('tasks/:taskId/respond-input')
+  async respondInput(@Param('taskId') taskId: string, @Body() body: { answer: string; run?: boolean }) {
+    return this.agents.respondInput(taskId, body.answer, body.run !== false);
+  }
 }

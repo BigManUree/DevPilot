@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { DatabaseService } from '../database/database.module';
 import { PermissionService } from '../permissions/permission.service';
@@ -95,8 +95,64 @@ export class AgentService implements OnModuleInit {
     return { taskId, status: 'Cancelled' };
   }
 
+  /** 暂停任务（测试场景 12）：仅 Preparing/Running 中的任务可暂停，执行循环在每个子任务前检查 */
+  pauseTask(taskId: string) {
+    const t = this.getTaskRow(taskId);
+    if (!['Preparing', 'Running'].includes(t.status)) {
+      throw new ConflictException(`仅执行中的任务可暂停，当前状态：${t.status}`);
+    }
+    this.ds.db.prepare(`UPDATE tasks SET status='Paused' WHERE id=?`).run(taskId);
+    this.broadcastTask(taskId, 'Paused');
+    return { taskId, status: 'Paused' };
+  }
+
+  /** 恢复任务：Paused → Running，执行循环自动继续 */
+  resumeTask(taskId: string) {
+    const t = this.getTaskRow(taskId);
+    if (t.status !== 'Paused') {
+      throw new ConflictException(`仅已暂停的任务可恢复，当前状态：${t.status}`);
+    }
+    this.ds.db.prepare(`UPDATE tasks SET status='Running' WHERE id=?`).run(taskId);
+    this.broadcastTask(taskId, 'Running');
+    return { taskId, status: 'Running' };
+  }
+
+  /** 用户补充信息（需求 5.2）：WaitingInput → 合并输入 → 重新执行 */
+  async respondInput(taskId: string, answer: string, run = true) {
+    const t = this.getTaskRow(taskId);
+    if (t.status !== 'WaitingInput') {
+      throw new ConflictException(`任务不在等待输入状态，当前状态：${t.status}`);
+    }
+    const merged = `${t.input_summary}\n[用户补充 ${new Date().toISOString()}] ${answer}`;
+    this.ds.db.prepare(`UPDATE tasks SET input_summary=?, status='Pending' WHERE id=?`).run(merged, taskId);
+    this.broadcastTask(taskId, 'Pending');
+    if (run) return this.runTask(taskId);
+    return { taskId, status: 'Pending' };
+  }
+
+  private getTaskRow(taskId: string): { id: string; status: string; input_summary: string; project_scope: string | null } {
+    const t = this.ds.db.prepare('SELECT id, status, input_summary, project_scope FROM tasks WHERE id = ?').get(taskId) as
+      | { id: string; status: string; input_summary: string; project_scope: string | null }
+      | undefined;
+    if (!t) throw new NotFoundException(`任务不存在：${taskId}`);
+    return t;
+  }
+
+  /** 暂停等待点：DB 状态为 Paused 时轮询挂起，Cancelled 时终止循环 */
+  private async waitWhilePaused(taskId: string): Promise<{ cancelled: boolean }> {
+    for (;;) {
+      const t = this.ds.db.prepare('SELECT status FROM tasks WHERE id = ?').get(taskId) as { status: string } | undefined;
+      if (!t) return { cancelled: true };
+      if (t.status === 'Paused') {
+        await new Promise((r) => setTimeout(r, 400));
+        continue;
+      }
+      return { cancelled: t.status === 'Cancelled' };
+    }
+  }
+
   /** Supervisor 主流程：规划 → 顺序执行 → 汇总 */
-  async runTask(taskId: string): Promise<{ status: string; plan?: TaskPlan; results?: unknown; blocked?: unknown }> {
+  async runTask(taskId: string): Promise<{ status: string; plan?: TaskPlan; results?: unknown; blocked?: unknown; question?: string }> {
     const task = this.ds.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as
       | { id: string; project_scope: string | null; input_summary: string; status: string }
       | undefined;
@@ -108,7 +164,7 @@ export class AgentService implements OnModuleInit {
     this.ds.db.prepare(`UPDATE tasks SET status='Preparing', started_at=? WHERE id=?`).run(new Date().toISOString(), taskId);
     this.broadcastTask(taskId, 'Preparing');
 
-    // 1) LLM 规划（JSON 输出）
+    // 1) LLM 规划（JSON 输出）；无法识别 → 转 WaitingInput 向用户追问（需求 5.2）
     let plan: TaskPlan;
     try {
       const prompt = this.planPrompt(task.input_summary, task.project_scope ?? undefined);
@@ -117,9 +173,13 @@ export class AgentService implements OnModuleInit {
         { role: 'user', content: prompt },
       ], { json: true });
       plan = JSON.parse(raw) as TaskPlan;
+      if (!plan?.subtasks?.length) throw new Error('empty plan');
     } catch (err) {
-      this.ds.db.prepare(`UPDATE tasks SET status='Failed', result_summary=? WHERE id=?`).run(`planning failed: ${String(err).slice(0, 200)}`, taskId);
-      throw err;
+      const question = `无法为该目标生成可执行计划（${String(err).slice(0, 120)}）。请补充说明：1) 任务目标与期望结果；2) 涉及哪个项目/服务或路径；3) 有无前置条件。`;
+      this.ds.db.prepare(`UPDATE tasks SET status='WaitingInput', result_summary=? WHERE id=?`).run(question.slice(0, 300), taskId);
+      this.broadcastTask(taskId, 'WaitingInput');
+      this.notify.create({ type: 'task.waiting_input', title: `任务需要补充信息：${task.input_summary.slice(0, 40)}`, content: question, priority: 3 });
+      return { status: 'WaitingInput', question };
     }
 
     // 2) 子任务落库
@@ -132,7 +192,10 @@ export class AgentService implements OnModuleInit {
       insSub.run(sid, taskId, s.agent, JSON.stringify(s), s.completion_criteria ?? null);
       subIds.push(sid);
     }
-    this.ds.db.prepare(`UPDATE tasks SET status='Running', plan_version=plan_version+1 WHERE id=?`).run(taskId);
+    // 规划完成进入执行：若期间已被暂停（Preparing→Paused），保持 Paused，由子任务循环的等待点接管
+    this.ds.db.prepare(
+      `UPDATE tasks SET status = CASE WHEN status='Paused' THEN 'Paused' ELSE 'Running' END, plan_version=plan_version+1 WHERE id=?`,
+    ).run(taskId);
     this.broadcastTask(taskId, 'Running');
     // 本次任务运行的 agent_executions 记录（tool_calls FK 依赖）
     const execId = randomUUID();
@@ -145,6 +208,12 @@ export class AgentService implements OnModuleInit {
     for (let i = 0; i < plan.subtasks.length; i++) {
       const s = plan.subtasks[i];
       const sid = subIds[i];
+      // 暂停等待点（测试场景 12）：Paused 挂起、Cancelled 终止
+      const gate = await this.waitWhilePaused(taskId);
+      if (gate.cancelled) {
+        this.notify.create({ type: 'task.cancelled', title: `任务已取消：${plan.goal.slice(0, 40)}`, content: `在子任务「${s.title}」前取消`, priority: 3 });
+        return { status: 'Cancelled', plan, results };
+      }
       this.ds.db.prepare(`UPDATE subtasks SET status='Running' WHERE id=?`).run(sid);
       // checkpoint
       this.ds.db.prepare(
