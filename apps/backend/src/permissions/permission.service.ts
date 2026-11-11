@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseService } from '../database/database.module';
 
 export interface PermissionCheckRequest {
-  subjectType: 'user' | 'supervisor' | 'agent' | 'plugin' | 'external';
+  subjectType: 'user' | 'supervisor' | 'agent' | 'plugin' | 'external' | 'workflow';
   subjectId: string;
   category: string; // PermissionCategory
   projectId?: string;

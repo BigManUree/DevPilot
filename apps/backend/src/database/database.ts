@@ -465,7 +465,36 @@ const V7: Migration = {
   },
 };
 
-export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5, V6, V7];
+/** V8：高级工作流（第三阶段，DSL 定义 + 运行实例） */
+const V8: Migration = {
+  version: 8,
+  name: 'workflows',
+  up: (db) => {
+    db.exec(`
+CREATE TABLE workflows (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  definition_json TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(name)
+);
+
+CREATE TABLE workflow_runs (
+  id TEXT PRIMARY KEY,
+  workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'Running',
+  current_step TEXT,
+  context_json TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT
+);
+`);
+  },
+};
+
+export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5, V6, V7, V8];
 
 export function openDatabase(dataDir: string): Database.Database {
   fs.mkdirSync(dataDir, { recursive: true });

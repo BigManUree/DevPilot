@@ -16,7 +16,7 @@ import { EXECUTION_LIMITS_DEFAULT } from '@devpilot/shared-types';
  */
 
 export interface ToolCallRequest {
-  subjectType: 'user' | 'supervisor' | 'agent' | 'plugin';
+  subjectType: 'user' | 'supervisor' | 'agent' | 'plugin' | 'external' | 'workflow';
   subjectId: string;
   tool: 'fs.read' | 'fs.write' | 'command.exec';
   params: Record<string, unknown>;
