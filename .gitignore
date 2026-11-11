@@ -21,3 +21,6 @@ docs/_extracted/
 
 # git 功能测试夹具（内嵌 .git 的本地仓库，不作为 submodule 提交）
 tests/fixtures/git-demo/
+
+# 验收脚本运行产物
+tests/fixtures/.devpilot-backup/

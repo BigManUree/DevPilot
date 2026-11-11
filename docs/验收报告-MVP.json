@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-11T03:02:02.144Z",
+  "date": "2026-11-11T03:25:02.014Z",
   "version": "MVP 0.1.0",
   "results": [
     {
@@ -30,13 +30,13 @@
       "id": "S6",
       "name": "外部进程存活（停止仅限会话进程）",
       "pass": true,
-      "detail": "extPid=26208"
+      "detail": "extPid=7612"
     },
     {
       "id": "S3",
       "name": "端口占用检测",
       "pass": true,
-      "detail": "[{\"service\":\"java-backend\",\"port\":8080,\"occupied\":false},{\"service\":\"echo-accept\",\"port\":18897,\"occupied\":false},{\"service\":\"echo-accept-1794324858512\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794366086610\",\"port\":18899,\"occupied\":true}]"
+      "detail": "[{\"service\":\"java-backend\",\"port\":8080,\"occupied\":false},{\"service\":\"echo-accept\",\"port\":18897,\"occupied\":false},{\"service\":\"echo-accept-1794324858512\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794366086610\",\"port\":18899,\"occupied\":true},{\"service\":\"echo-accept-1794367466896\",\"port\":18899,\"occupied\":true}]"
     },
     {
       "id": "S4",
