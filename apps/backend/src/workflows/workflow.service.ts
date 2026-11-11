@@ -1,10 +1,11 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { DatabaseService } from '../database/database.module';
 import { ToolGatewayService } from '../permissions/tool-gateway.service';
 import { AgentService } from '../agents/agent.service';
 import { NotificationService } from '../notifications/notification.service';
 import { EventsGateway } from '../events.gateway';
+import { LogService } from '../logs/log.service';
 
 /**
  * 高级工作流（第三阶段，DSL 第一批）：
@@ -34,21 +35,34 @@ export interface WorkflowStep {
   continueOnError?: boolean;
 }
 
+export interface WorkflowTrigger {
+  /** manual（默认，不写 trigger 即手动）/ schedule（intervalMinutes）/ event（eventType 匹配广播） */
+  type: 'schedule' | 'event';
+  /** schedule：触发间隔（分钟） */
+  intervalMinutes?: number;
+  /** event：匹配的事件类型（精确匹配 event_type） */
+  eventType?: string;
+}
+
 export interface WorkflowDefinition {
   name: string;
+  trigger?: WorkflowTrigger;
   steps: WorkflowStep[];
 }
 
 const MAX_STEP_EXECUTIONS = 50;
 
 @Injectable()
-export class WorkflowService {
+export class WorkflowService implements OnModuleInit {
+  /** 运行中工作流（防 event 触发重入） */
+  private runningWorkflows = new Set<string>();
   constructor(
     private readonly ds: DatabaseService,
     private readonly toolGateway: ToolGatewayService,
     private readonly agents: AgentService,
     private readonly notify: NotificationService,
     private readonly events: EventsGateway,
+    private readonly logs: LogService,
   ) {}
 
   /** 定义校验：非空 steps、step.id 唯一、condition 必须有跳转目标且目标存在 */
@@ -150,6 +164,48 @@ export class WorkflowService {
     }
   }
 
+  /** 触发器：event（包装广播分发）+ schedule（每分钟扫描 intervalMinutes 到期的工作流） */
+  onModuleInit(): void {
+    const original = this.events.broadcast.bind(this.events);
+    (this.events as { broadcast: (ev: unknown) => void }).broadcast = (ev: unknown) => {
+      original(ev as never);
+      const e = ev as { event_type?: string };
+      if (!e.event_type || e.event_type === 'workflow.progress') return;
+      void this.fireEventTriggers(e.event_type);
+    };
+    setInterval(() => void this.fireScheduleTriggers(), 60_000).unref();
+  }
+
+  private async fireEventTriggers(eventType: string): Promise<void> {
+    const rows = this.ds.db.prepare('SELECT id, definition_json FROM workflows WHERE enabled=1').all() as Array<{ id: string; definition_json: string }>;
+    for (const row of rows) {
+      if (this.runningWorkflows.has(row.id)) continue;
+      let def: WorkflowDefinition;
+      try { def = JSON.parse(row.definition_json); } catch { continue; }
+      if (def.trigger?.type !== 'event' || def.trigger.eventType !== eventType) continue;
+      try {
+        await this.run(row.id);
+        this.logs.log({ level: 'info', sourceModule: 'workflow.trigger', message: `event trigger fired: workflow=${row.id} event=${eventType}` });
+      } catch { /* 运行中/已停用等正常竞态 */ }
+    }
+  }
+
+  private async fireScheduleTriggers(): Promise<void> {
+    const rows = this.ds.db.prepare('SELECT id, definition_json FROM workflows WHERE enabled=1').all() as Array<{ id: string; definition_json: string }>;
+    for (const row of rows) {
+      if (this.runningWorkflows.has(row.id)) continue;
+      let def: WorkflowDefinition;
+      try { def = JSON.parse(row.definition_json); } catch { continue; }
+      if (def.trigger?.type !== 'schedule' || !def.trigger.intervalMinutes || def.trigger.intervalMinutes < 1) continue;
+      const last = this.ds.db.prepare('SELECT MAX(started_at) t FROM workflow_runs WHERE workflow_id = ?').get(row.id) as { t: string | null };
+      if (last.t && Date.now() - new Date(last.t).getTime() < def.trigger.intervalMinutes * 60_000) continue;
+      try {
+        await this.run(row.id);
+        this.logs.log({ level: 'info', sourceModule: 'workflow.trigger', message: `schedule trigger fired: workflow=${row.id} every=${def.trigger.intervalMinutes}min` });
+      } catch { /* 竞态忽略 */ }
+    }
+  }
+
   private broadcast(runId: string, wfId: string, stepId: string | null, status: string) {
     this.events.broadcast({
       event_id: randomUUID(),
@@ -164,9 +220,18 @@ export class WorkflowService {
 
   /** 执行工作流：同步推进（步骤均轻量或经审批门），最多 50 步推进防循环 */
   async run(id: string): Promise<{ runId: string; status: string; context: Record<string, any> }> {
+    if (this.runningWorkflows.has(id)) throw new NotFoundException(`工作流正在运行中：${id}`);
     const wf = this.get(id);
     if (!wf.enabled) throw new NotFoundException(`工作流已停用：${id}`);
-    const def = wf.definition as WorkflowDefinition;
+    this.runningWorkflows.add(id);
+    try {
+      return await this.runInner(id, wf.definition as WorkflowDefinition);
+    } finally {
+      this.runningWorkflows.delete(id);
+    }
+  }
+
+  private async runInner(id: string, def: WorkflowDefinition): Promise<{ runId: string; status: string; context: Record<string, any> }> {
     const runId = randomUUID();
     const ctx: Record<string, any> = {};
     const now = new Date().toISOString();

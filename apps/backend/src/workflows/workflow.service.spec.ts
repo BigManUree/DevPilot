@@ -11,7 +11,7 @@ function makeService(overrides?: { toolGateway?: Record<string, unknown>; agents
   };
   const notify = { create: jest.fn().mockReturnValue('n-1') };
   const events = { broadcast: jest.fn() };
-  const svc = new WorkflowService(stub(ds), stub(toolGateway), stub(agents), stub(notify), stub(events)) as unknown as WorkflowService;
+  const svc = new WorkflowService(stub(ds), stub(toolGateway), stub(agents), stub(notify), stub(events), stub({ log: jest.fn() })) as unknown as WorkflowService;
   return { ds, svc, toolGateway, agents, notify, events };
 }
 

@@ -21,9 +21,10 @@ import { BackupModule } from './backup/backup.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PluginsModule } from './plugins/plugins.module';
 import { WorkflowsModule } from './workflows/workflows.module';
+import { McpModule } from './mcp/mcp.module';
 
 @Module({
-  imports: [DatabaseModule, EventsModule, LogsModule, PermissionsModule, ProjectsModule, RuntimeModule, TerminalModule, EnvironmentsModule, AgentsModule, DiagnosticsModule, GitModule, WorkspaceModule, MemoryModule, DatabasesModule, ExternalToolsModule, ConfigCenterModule, BackupModule, NotificationsModule, PluginsModule, WorkflowsModule],
+  imports: [DatabaseModule, EventsModule, LogsModule, PermissionsModule, ProjectsModule, RuntimeModule, TerminalModule, EnvironmentsModule, AgentsModule, DiagnosticsModule, GitModule, WorkspaceModule, MemoryModule, DatabasesModule, ExternalToolsModule, ConfigCenterModule, BackupModule, NotificationsModule, PluginsModule, WorkflowsModule, McpModule],
   controllers: [HealthController, SystemController],
 })
 export class AppModule {}

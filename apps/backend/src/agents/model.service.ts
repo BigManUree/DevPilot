@@ -170,30 +170,65 @@ export class ModelService {
     };
   }
 
-  /** 对话：OpenAI 兼容 /chat/completions（走当前激活供应商） */
-  async chat(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, opts?: { json?: boolean }): Promise<string> {
-    if (!(await this.loadKeyFromStore())) throw new Error('model api key not configured（请先 POST /api/v1/models/config 设置 API Key）');
-    const p = this.resolveProvider();
-    if (!p.baseUrl) throw new Error(`供应商 ${p.id} 未配置 baseUrl（POST /models/config 传 baseUrl）`);
-    const res = await fetch(`${p.baseUrl}/chat/completions`, {
+  /** 单供应商调用（内部）：失败抛错，由 chat 的降级链捕获 */
+  private async chatOnce(providerId: string, messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, opts?: { json?: boolean }): Promise<string> {
+    const p = this.resolveProvider(providerId);
+    if (!p.baseUrl) throw new Error(`供应商 ${providerId} 未配置 baseUrl`);
+    const key = this.apiKeyFor(providerId);
+    if (!key) throw new Error(`供应商 ${providerId} 无可用 Key`);
+    const model = this.overrides[providerId]?.model || p.defaultModel;
+    const baseUrl = this.overrides[providerId]?.baseUrl || p.baseUrl;
+    const res = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.apiKey}`,
-      },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
       body: JSON.stringify({
-        model: p.defaultModel,
+        model,
         messages,
         ...(opts?.json ? { response_format: { type: 'json_object' } } : {}),
       }),
     });
     if (!res.ok) {
       const text = await res.text();
-      this.logs.log({ level: 'error', sourceModule: 'model', message: `chat failed ${res.status}: ${text.slice(0, 300)}` });
       throw new Error(`model api error ${res.status}: ${text.slice(0, 300)}`);
     }
     const body = (await res.json()) as { choices: Array<{ message: { content: string } }>; usage?: unknown };
-    this.logs.log({ level: 'info', sourceModule: 'model', message: `chat ok provider=${p.id} usage=${JSON.stringify(body.usage ?? {})}` });
+    this.logs.log({ level: 'info', sourceModule: 'model', message: `chat ok provider=${providerId} usage=${JSON.stringify(body.usage ?? {})}` });
     return body.choices[0]?.message?.content ?? '';
+  }
+
+  private apiKeyFor(providerId: string): string | null {
+    if (providerId === this.activeProvider && this.apiKey) return this.apiKey;
+    // 其他供应商：凭据存储热读（vault/文件），缓存到内存避免重复 IO
+    const cached = (this as any)._keyCache as Map<string, string> | undefined;
+    if (cached?.has(providerId)) return cached.get(providerId) ?? null;
+    return null;
+  }
+
+  /**
+   * 对话（B5 主备降级链）：先走 active provider；网络错误 / 4xx/5xx 时
+   * 按 PROVIDER_CATALOG 顺序尝试其他已配置 Key 的供应商，全部失败才抛错。
+   * 降级过程逐跳落日志，最终错误信息带完整尝试链。
+   */
+  async chat(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, opts?: { json?: boolean }): Promise<string> {
+    if (!(await this.loadKeyFromStore())) throw new Error('model api key not configured（请先 POST /api/v1/models/config 设置 API Key）');
+    const attempts: string[] = [];
+    const chain = [this.activeProvider, ...Object.keys(PROVIDER_CATALOG).filter((id) => id !== this.activeProvider)];
+    for (const providerId of chain) {
+      // 逐个加载该供应商的 Key（vault 热读），无 Key 跳过
+      if (providerId !== this.activeProvider) {
+        const ok = await this.loadKeyFromStore(providerId);
+        if (!ok || !this.apiKey) { attempts.push(`${providerId}:no-key`); continue; }
+        (this as any)._keyCache = (this as any)._keyCache ?? new Map<string, string>();
+        (this as any)._keyCache.set(providerId, this.apiKey);
+        this.apiKey = null; // 复位，避免污染 active 的 key 状态
+      }
+      try {
+        return await this.chatOnce(providerId, messages, opts);
+      } catch (e) {
+        attempts.push(`${providerId}:${String(e).slice(0, 80)}`);
+        this.logs.log({ level: 'warn', sourceModule: 'model', message: `provider ${providerId} failed, trying next: ${String(e).slice(0, 120)}` });
+      }
+    }
+    throw new Error(`all providers failed（尝试链：${attempts.join(' | ')}）`);
   }
 }
