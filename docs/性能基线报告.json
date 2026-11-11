@@ -1,38 +1,45 @@
 {
-  "date": "2026-11-11T06:29:38.419Z",
+  "date": "2026-11-11T07:08:47.572Z",
   "machine": "Windows (target hardware: local dev machine)",
   "apiLatencyMs": {
     "health": {
       "avg": 1,
-      "p50": 0,
-      "p95": 1,
-      "p99": 26
+      "p50": 1,
+      "p95": 2,
+      "p99": 3
     },
     "projects": {
       "avg": 1,
-      "p50": 0,
+      "p50": 1,
       "p95": 1,
-      "p99": 1
+      "p99": 2
     },
     "notifications": {
       "avg": 1,
       "p50": 1,
       "p95": 1,
-      "p99": 1
+      "p99": 2
     }
   },
   "importProjectMs": {
-    "elapsed": 10,
+    "elapsed": 25,
     "services": 2
   },
   "envDetectMs": {
-    "elapsed": 586,
+    "elapsed": 873,
     "tools": 15
   },
+  "wsPushLatencyMs": {
+    "samples": 10,
+    "avg": 2,
+    "p95": 4,
+    "target": "≤1000",
+    "note": "POST 响应返回 → 客户端 WS 收到 notification.new"
+  },
+  "daemonRestored": "external-recovery-required：请运行 scripts/start-backend.cmd 或 WMI 派生 backend-daemon.cmd 恢复常驻",
   "coldStartMs": {
-    "elapsed": 1034,
+    "elapsed": 1062,
     "target": "≤5000（测试方案建议值）",
     "note": "从 spawn node 到首个 health 200，含 Nest 路由映射与 V5 迁移检查"
-  },
-  "daemonRestored": true
+  }
 }

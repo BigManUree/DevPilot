@@ -11,8 +11,18 @@ export class AgentController {
 
   // ---- 模型配置 ----
   @Post('models/config')
-  setKey(@Body() body: { provider?: 'deepseek'; apiKey: string }) {
-    return this.model.setApiKey(body.provider ?? 'deepseek', body.apiKey);
+  setKey(@Body() body: { provider?: string; apiKey: string; model?: string; baseUrl?: string }) {
+    return this.model.setApiKey(body.provider ?? 'deepseek', body.apiKey, { model: body.model, baseUrl: body.baseUrl });
+  }
+
+  @Post('models/switch')
+  switchProvider(@Body() body: { provider: string }) {
+    return this.model.switchProvider(body.provider);
+  }
+
+  @Get('models/providers')
+  listProviders() {
+    return this.model.listProviders();
   }
 
   @Get('models/status')

@@ -167,7 +167,7 @@ export class ToolGatewayService {
 
     return new Promise((resolve, reject) => {
       const { shell, args: shellArg } = plat.shellFor(command);
-      const child = spawn(shell, shellArg, { cwd, windowsHide: true });
+      const child = spawn(shell, shellArg, { cwd, windowsHide: true, ...(plat.shellFor(command).options ?? {}) });
       let stdout = '';
       let stderr = '';
       let timedOut = false;

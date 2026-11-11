@@ -131,7 +131,7 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     const sid = sessionId ?? randomUUID();
     const { shell, args } = plat.shellFor(svc.start_command);
     const env = svc.env_json ? { ...process.env, ...(JSON.parse(svc.env_json) as Record<string, string>) } : process.env;
-    const child = spawn(shell, args, { cwd: svc.workdir, env, windowsHide: true });
+    const child = spawn(shell, args, { cwd: svc.workdir, env, windowsHide: true, ...(plat.shellFor(svc.start_command).options ?? {}) });
 
     this.tracked.set(serviceId, { serviceId, sessionId: sid, child, startedAt: Date.now() });
     this.appendSessionPids(sid, child.pid);
@@ -200,7 +200,7 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     if (full?.stop_command) {
       const stop = plat.shellFor(full.stop_command);
       spawn(stop.shell, stop.args,
-        { cwd: this.getServiceWorkdir(serviceId), windowsHide: true });
+        { cwd: this.getServiceWorkdir(serviceId), windowsHide: true, ...(stop.options ?? {}) });
       const deadline = Date.now() + 5000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 400));

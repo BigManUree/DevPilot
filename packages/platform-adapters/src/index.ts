@@ -9,14 +9,21 @@ const execP = promisify(exec);
  * backend 服务不再散落 process.platform 分支；macOS/Linux 适配只需新增实现。
  */
 
+/** spawn 选项扩展：win32 verbatim 透传引号 */
+export interface SpawnOptionsExt {
+  windowsVerbatimArguments?: boolean;
+}
+
 export interface ShellSpec {
   shell: string;
   args: string[];
+  /** win32 下 shellFor 返回 verbatim，调用方 spawn 时透传（防 cmd /c 拆坏命令内引号） */
+  options?: SpawnOptionsExt;
 }
 
 export interface PlatformAdapter {
   readonly platform: NodeJS.Platform;
-  /** 一次性命令执行 shell：win32 → cmd.exe /c；POSIX → /bin/sh -c */
+  /** 一次性命令执行 shell：win32 → cmd.exe /d /s /c（verbatim 保引号）；POSIX → /bin/sh -c */
   shellFor(command: string): ShellSpec;
   /** 交互式终端 shell：win32 → powershell.exe -NoLogo；POSIX → /bin/bash */
   interactiveShell(): ShellSpec;
@@ -40,7 +47,8 @@ class Win32Adapter implements PlatformAdapter {
   readonly platform = 'win32' as const;
 
   shellFor(command: string): ShellSpec {
-    return { shell: 'cmd.exe', args: ['/c', command] };
+    // /s 修改引号剥离规则 + verbatim：命令内的双引号（如 node -e "..."）原样传给 cmd，不再被拆坏
+    return { shell: 'cmd.exe', args: ['/d', '/s', '/c', command], options: { windowsVerbatimArguments: true } };
   }
 
   interactiveShell(): ShellSpec {
