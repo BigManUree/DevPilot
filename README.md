@@ -5,7 +5,7 @@
 ## 当前状态（2026-11-11）
 
 - **验收 14/14 PASSED**（`node tests/acceptance.mjs`，可重复运行）
-- **单元测试 48/48**（6 suites，`cd apps/backend && pnpm test`）
+- **单元测试 62/62**（7 suites，`cd apps/backend && pnpm test`）
 - 数据库 schema v8（31 表，版本化迁移 + 迁移前自动备份）
 - 后端端口 37100（REST `/api/v1/*` + WebSocket `/ws` 事件推送）
 
@@ -32,11 +32,11 @@
 | Agent 中心 | 6 注册 Agent、协作过程 |
 | 记忆系统 | scope 过滤、检索、沉淀 |
 | 插件中心 | 声明式插件（Manifest 校验/依赖/兼容/启停） |
-| 工作流 | JSON DSL 定义、线性/条件跳转、运行历史与上下文 |
+| 工作流 | JSON DSL 定义、schedule(interval/cron)/event 触发器、SVG DAG 拓扑图、运行历史与上下文 |
 
 ## 开放接口
 
-- **MCP Server**：`scripts/mcp-server.mjs`（零依赖 stdio，JSON-RPC 2.0）——tools（健康/项目/任务/任务执行/服务/通知）+ resources + prompts；外部执行走审批双门。接入：`{ "command": "node", "args": ["<repo>/scripts/mcp-server.mjs"] }`
+- **MCP Server**：`scripts/mcp-server.mjs`（零依赖 stdio，JSON-RPC 2.0）——tools（健康/项目/任务/任务执行/服务/通知）+ resources + prompts；外部执行走审批双门。HTTP 端点 `POST/GET /api/v1/mcp`（JSON-RPC 同步 + Accept text/event-stream SSE 流式）。接入：`{ "command": "node", "args": ["<repo>/scripts/mcp-server.mjs"] }`
 - **REST**：`/api/v1/*` 全模块（projects/tasks/services/workflows/plugins/memories/notifications/...）
 
 ## 结构
@@ -47,7 +47,7 @@
 - `packages/shared-types` — DTO、事件与共享类型
 - `packages/platform-adapters` — OS 差异适配层（shell/进程树/凭据存储/工具发现/解压）
 - `packages/api-client` — 前端 API 客户端
-- `scripts/` — 打包（prepare-backend）、e2e 验证（desktop/packaged/mcp/selfheal/plugin/workflow/update）、守护（backend-daemon）
+- `scripts/` — 打包（prepare-backend）、e2e 验证（desktop/packaged/mcp/selfheal/plugin/workflow/update/p21/p22）、守护（backend-daemon）
 - `tests/` — acceptance.mjs（14 场景）+ fixtures
 
 ## 开发

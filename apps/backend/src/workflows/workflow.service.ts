@@ -6,6 +6,7 @@ import { AgentService } from '../agents/agent.service';
 import { NotificationService } from '../notifications/notification.service';
 import { EventsGateway } from '../events.gateway';
 import { LogService } from '../logs/log.service';
+import { cronMatches, parseCron, sameMinute } from './cron';
 
 /**
  * 高级工作流（第三阶段，DSL 第一批）：
@@ -36,10 +37,12 @@ export interface WorkflowStep {
 }
 
 export interface WorkflowTrigger {
-  /** manual（默认，不写 trigger 即手动）/ schedule（intervalMinutes）/ event（eventType 匹配广播） */
+  /** manual（默认，不写 trigger 即手动）/ schedule（intervalMinutes 或 cron）/ event（eventType 匹配广播） */
   type: 'schedule' | 'event';
-  /** schedule：触发间隔（分钟） */
+  /** schedule：触发间隔（分钟）；与 cron 同时存在时 cron 优先 */
   intervalMinutes?: number;
+  /** schedule：5 字段 cron（分 时 日 月 周），如 "0 9 * * 1-5"；同分钟内只触发一次 */
+  cron?: string;
   /** event：匹配的事件类型（精确匹配 event_type） */
   eventType?: string;
 }
@@ -88,12 +91,27 @@ export class WorkflowService implements OnModuleInit {
         if (g && g !== 'end' && !ids.has(g)) return { ok: false, error: `condition step ${st.id} 跳转目标不存在：${g}` };
       }
     }
+    if (def.trigger) {
+      if (def.trigger.type === 'schedule' && def.trigger.cron !== undefined) {
+        const p = parseCron(def.trigger.cron);
+        if (!p.ok) return { ok: false, error: `cron 表达式非法：${p.error ?? '解析失败'}` };
+      }
+      if (def.trigger.type === 'event' && !def.trigger.eventType) return { ok: false, error: 'event 触发器缺 eventType' };
+    }
     return { ok: true, definition: def };
   }
 
-  list(): Array<{ id: string; name: string; enabled: boolean; steps: number; updated_at: string }> {
+  list(): Array<{ id: string; name: string; enabled: boolean; steps: number; trigger: string; updated_at: string }> {
     const rows = this.ds.db.prepare('SELECT id, name, definition_json, enabled, updated_at FROM workflows ORDER BY updated_at DESC').all() as any[];
-    return rows.map((r) => { let d: WorkflowDefinition; try { d = JSON.parse(r.definition_json); } catch { d = { name: r.name, steps: [] }; } return { id: r.id, name: r.name, enabled: !!r.enabled, steps: d.steps.length, updated_at: r.updated_at }; });
+    return rows.map((r) => {
+      let d: WorkflowDefinition;
+      try { d = JSON.parse(r.definition_json); } catch { d = { name: r.name, steps: [] }; }
+      const t = d.trigger;
+      const trigger = !t ? '手动'
+        : t.type === 'schedule' ? (t.cron ? `cron ${t.cron}` : `每 ${t.intervalMinutes} 分钟`)
+        : `事件 ${t.eventType}`;
+      return { id: r.id, name: r.name, enabled: !!r.enabled, steps: d.steps.length, trigger, updated_at: r.updated_at };
+    });
   }
 
   create(body: { name: string; definition: WorkflowDefinition }) {
@@ -192,12 +210,24 @@ export class WorkflowService implements OnModuleInit {
 
   private async fireScheduleTriggers(): Promise<void> {
     const rows = this.ds.db.prepare('SELECT id, definition_json FROM workflows WHERE enabled=1').all() as Array<{ id: string; definition_json: string }>;
+    const now = new Date();
     for (const row of rows) {
       if (this.runningWorkflows.has(row.id)) continue;
       let def: WorkflowDefinition;
       try { def = JSON.parse(row.definition_json); } catch { continue; }
-      if (def.trigger?.type !== 'schedule' || !def.trigger.intervalMinutes || def.trigger.intervalMinutes < 1) continue;
+      if (def.trigger?.type !== 'schedule') continue;
       const last = this.ds.db.prepare('SELECT MAX(started_at) t FROM workflow_runs WHERE workflow_id = ?').get(row.id) as { t: string | null };
+      if (def.trigger.cron) {
+        // cron 路径：匹配当前分钟，且同分钟未触发过
+        if (!cronMatches(def.trigger.cron, now)) continue;
+        if (last.t && sameMinute(new Date(last.t), now)) continue;
+        try {
+          await this.run(row.id);
+          this.logs.log({ level: 'info', sourceModule: 'workflow.trigger', message: `schedule trigger fired: workflow=${row.id} cron=${def.trigger.cron}` });
+        } catch { /* 竞态忽略 */ }
+        continue;
+      }
+      if (!def.trigger.intervalMinutes || def.trigger.intervalMinutes < 1) continue;
       if (last.t && Date.now() - new Date(last.t).getTime() < def.trigger.intervalMinutes * 60_000) continue;
       try {
         await this.run(row.id);

@@ -1487,6 +1487,113 @@ function PluginsCenterPage() {
   );
 }
 
+/* ---------- 工作流拓扑图（9.8 完整形态：DAG + 条件分支 + 回边） ---------- */
+const TOPO_W = 176, TOPO_H = 52, TOPO_GAP_X = 210, TOPO_GAP_Y = 78;
+
+function WorkflowTopology({ steps }: { steps: any[] }) {
+  type Edge = { from: string; to: string; label?: string; back: boolean };
+  const edges: Edge[] = [];
+  const pushEdge = (from: string, to: string, label?: string) => {
+    if (edges.some((e) => e.from === from && e.to === to)) return;
+    edges.push({ from, to, label, back: false });
+  };
+  steps.forEach((s, i) => {
+    const next = steps[i + 1]?.id;
+    const resolve = (g?: string) => (g === 'end' ? '__end__' : g || next);
+    if (s.type === 'condition') {
+      const t = resolve(s.gotoOnTrue);
+      const f = resolve(s.gotoOnFalse);
+      if (t && t !== f) pushEdge(s.id, t, 'T');
+      if (f) pushEdge(s.id, f, t === f ? undefined : 'F');
+    } else if (next) {
+      pushEdge(s.id, next);
+    } else {
+      pushEdge(s.id, '__end__');
+    }
+  });
+  // 分层：BFS（前向边定层，回边不参与层计算）
+  const idx = new Map(steps.map((s, i) => [s.id, i]));
+  const layer = new Map<string, number>([[steps[0]?.id ?? '', 0]]);
+  const queue = steps.length ? [steps[0].id] : [];
+  while (queue.length) {
+    const cur = queue.shift()!;
+    for (const e of edges) {
+      if (e.from !== cur || e.to === '__end__') continue;
+      if ((idx.get(e.to) ?? 0) <= (idx.get(e.from) ?? 0)) continue; // 回边不定层
+      if (!layer.has(e.to)) { layer.set(e.to, layer.get(cur)! + 1); queue.push(e.to); }
+    }
+  }
+  steps.forEach((s, i) => { if (!layer.has(s.id)) layer.set(s.id, i); }); // 兜底
+  const maxLayer = Math.max(...steps.map((s) => layer.get(s.id)!), 0);
+  const lanesByLayer = new Map<number, number>();
+  const pos = new Map<string, { x: number; y: number }>();
+  for (const s of steps) {
+    const l = layer.get(s.id)!;
+    const lane = lanesByLayer.get(l) ?? 0;
+    lanesByLayer.set(l, lane + 1);
+    pos.set(s.id, { x: 24 + l * TOPO_GAP_X, y: 24 + lane * TOPO_GAP_Y });
+  }
+  const endLayer = maxLayer + 1;
+  const endCount = lanesByLayer.get(endLayer) ?? 0;
+  pos.set('__end__', { x: 24 + endLayer * TOPO_GAP_X, y: 24 + endCount * TOPO_GAP_Y });
+  const endY = 24 + endCount * TOPO_GAP_Y;
+  const width = 24 + (endLayer + 1) * TOPO_GAP_X;
+  const height = Math.max(...[...pos.values()].map((p) => p.y), 0) + TOPO_H + 56;
+
+  const nodeColor = (t: string): { fill: string; stroke: string } =>
+    t === 'condition' ? { fill: '#f9f0ff', stroke: '#b37feb' }
+    : t === 'notify' ? { fill: '#e6fffb', stroke: '#5cdbd3' }
+    : t === 'task' ? { fill: '#fff7e6', stroke: '#ffd591' }
+    : { fill: '#f5f5f5', stroke: '#d9d9d9' };
+
+  return (
+    <svg width="100%" viewBox={`0 0 ${width} ${height}`} style={{ background: '#fafafa', borderRadius: 6 }}>
+      <defs>
+        <marker id="topo-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="#8c8c8c" />
+        </marker>
+      </defs>
+      {edges.map((e, i) => {
+        const p1 = pos.get(e.from)!;
+        const p2 = pos.get(e.to)!;
+        const isBack = (idx.get(e.to) ?? Infinity) <= (idx.get(e.from) ?? -1);
+        let path: string;
+        if (isBack) { // 回边：源底部绕到目标底部
+          const x1 = p1.x + TOPO_W / 2, y1 = p1.y + TOPO_H, x2 = p2.x + TOPO_W / 2, y2 = p2.y + TOPO_H;
+          const dip = Math.max(y1, y2) + 34;
+          path = `M ${x1} ${y1} C ${x1} ${dip}, ${x2} ${dip}, ${x2} ${y2}`;
+        } else { // 前向边：源右侧 → 目标左侧
+          const x1 = p1.x + TOPO_W, y1 = p1.y + TOPO_H / 2, x2 = p2.x, y2 = p2.y + TOPO_H / 2;
+          path = x2 - x1 > 24 ? `M ${x1} ${y1} C ${x1 + 40} ${y1}, ${x2 - 40} ${y2}, ${x2} ${y2}` : `M ${x1} ${y1} C ${x1 + 40} ${y1}, ${x2 - 40} ${y2}, ${x2} ${y2}`;
+        }
+        const color = e.label === 'T' ? '#52c41a' : e.label === 'F' ? '#ff4d4f' : '#8c8c8c';
+        const lx = (p1.x + TOPO_W + p2.x) / 2, ly = (p1.y + p2.y) / 2 + (isBack ? 26 : -6);
+        return (
+          <g key={i}>
+            <path d={path} fill="none" stroke={color} strokeWidth={e.label ? 1.6 : 1.2} strokeDasharray={isBack ? '5 4' : undefined} markerEnd="url(#topo-arrow)" />
+            {e.label && <text x={lx} y={ly} fontSize={12} fontWeight={600} fill={color} textAnchor="middle">{e.label}</text>}
+          </g>
+        );
+      })}
+      {steps.map((s) => {
+        const p = pos.get(s.id)!;
+        const c = nodeColor(s.type);
+        return (
+          <g key={s.id}>
+            <rect x={p.x} y={p.y} width={TOPO_W} height={TOPO_H} rx={8} fill={c.fill} stroke={c.stroke} />
+            <text x={p.x + 12} y={p.y + 21} fontSize={13} fontWeight={600} fill="#262626">{s.id}</text>
+            <text x={p.x + 12} y={p.y + 39} fontSize={11} fill="#8c8c8c">{s.type}</text>
+          </g>
+        );
+      })}
+      <g>
+        <rect x={pos.get('__end__')!.x} y={endY} width={TOPO_W} height={TOPO_H} rx={24} fill="#fff1f0" stroke="#ffa39e" strokeDasharray="4 3" />
+        <text x={pos.get('__end__')!.x + 12} y={endY + 31} fontSize={13} fill="#cf1322">结束 end</text>
+      </g>
+    </svg>
+  );
+}
+
 /* ---------- 工作流 ---------- */
 function WorkflowsPage() {
   const [rows, setRows] = useState<any[]>([]);
@@ -1527,13 +1634,14 @@ function WorkflowsPage() {
         extra={<Button size="small" type="primary" onClick={create}>创建</Button>}>
         <Space direction="vertical" style={{ width: '100%' }}>
           <Input placeholder="工作流名称（唯一）" value={newName} onChange={(e) => setNewName(e.target.value)} />
-          <Input.TextArea rows={6} placeholder={'步骤定义 JSON，例：\n{\n  "steps": [\n    { "id": "ver", "type": "command", "command": "node --version" },\n    { "id": "check", "type": "condition", "left": "${ver.exitCode}", "op": "eq", "right": "0", "gotoOnTrue": "good", "gotoOnFalse": "bad" },\n    { "id": "good", "type": "notify", "title": "健康 ${ver.output}" },\n    { "id": "finish", "type": "condition", "left": "1", "op": "eq", "right": "1", "gotoOnTrue": "end" },\n    { "id": "bad", "type": "notify", "title": "异常分支" }\n  ]\n}\n步骤类型：task（goal）/ command（command,cwd）/ notify（title,content）/ condition（left,op,right,gotoOnTrue,gotoOnFalse，"end" 终止）'} value={newJson} onChange={(e) => setNewJson(e.target.value)} />
+          <Input.TextArea rows={6} placeholder={'步骤定义 JSON，例：\n{\n  "trigger": { "type": "schedule", "cron": "0 9 * * 1-5" },\n  "steps": [\n    { "id": "ver", "type": "command", "command": "node --version" },\n    { "id": "check", "type": "condition", "left": "${ver.exitCode}", "op": "eq", "right": "0", "gotoOnTrue": "good", "gotoOnFalse": "bad" },\n    { "id": "good", "type": "notify", "title": "健康 ${ver.output}" },\n    { "id": "finish", "type": "condition", "left": "1", "op": "eq", "right": "1", "gotoOnTrue": "end" },\n    { "id": "bad", "type": "notify", "title": "异常分支" }\n  ]\n}\n步骤类型：task（goal）/ command（command,cwd）/ notify（title,content）/ condition（left,op,right,gotoOnTrue,gotoOnFalse，"end" 终止）\n触发器：schedule（intervalMinutes 或 cron，cron 5 字段 分 时 日 月 周，如 "0 9 * * 1-5"）/ event（eventType）'} value={newJson} onChange={(e) => setNewJson(e.target.value)} />
         </Space>
       </Card>
       <Card size="small" title="工作流列表">
         <Table rowKey="id" size="small" pagination={false} dataSource={rows}
           columns={[
             { title: '名称', dataIndex: 'name' },
+            { title: '触发器', dataIndex: 'trigger', width: 170, render: (t: string) => <Tag color={t === '手动' ? 'default' : t.startsWith('cron') ? 'purple' : t.startsWith('每') ? 'blue' : 'orange'}>{t}</Tag> },
             { title: '步骤数', dataIndex: 'steps', width: 80 },
             { title: '状态', dataIndex: 'enabled', width: 80, render: (e: boolean) => e ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> },
             { title: '更新时间', dataIndex: 'updated_at', ellipsis: true },
@@ -1548,9 +1656,23 @@ function WorkflowsPage() {
             ) },
           ]} />
       </Card>
-      <Modal open={!!detail} onCancel={() => { setDetail(null); setRuns([]); }} footer={null} title={`工作流：${detail?.name ?? ''}`} width={860}>
+      <Modal open={!!detail} onCancel={() => { setDetail(null); setRuns([]); }} footer={null} title={`工作流：${detail?.name ?? ''}`} width={960}>
         {detail && (
           <Tabs items={[
+            { key: 'topo', label: '拓扑视图', children: (
+              <Space direction="vertical" style={{ width: '100%' }}>
+                {detail.definition?.trigger && (
+                  <div>
+                    <Tag color={detail.definition.trigger.type === 'schedule' ? 'blue' : 'orange'}>
+                      触发器：{detail.definition.trigger.type === 'schedule'
+                        ? (detail.definition.trigger.cron ? `cron ${detail.definition.trigger.cron}` : `每 ${detail.definition.trigger.intervalMinutes} 分钟`)
+                        : `事件 ${detail.definition.trigger.eventType}`}
+                    </Tag>
+                  </div>
+                )}
+                <WorkflowTopology steps={detail.definition?.steps ?? []} />
+              </Space>
+            ) },
             { key: 'def', label: '步骤视图', children: (
               <Space direction="vertical" style={{ width: '100%' }}>
                 {(detail.definition?.steps ?? []).map((s: any) => (

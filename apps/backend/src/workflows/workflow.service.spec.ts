@@ -118,3 +118,54 @@ describe('WorkflowService 执行引擎', () => {
     await expect(svc.run('no-such')).rejects.toThrow(NotFoundException);
   });
 });
+
+describe('WorkflowService cron 触发器', () => {
+  it('schedule 校验：非法 cron 拒绝，合法通过', () => {
+    const { svc } = makeService();
+    const bad = svc.validateDefinition({ ...linearDef, trigger: { type: 'schedule', cron: '99 * * * *' } });
+    expect(bad.ok).toBe(false);
+    if (bad.ok === false) expect(bad.error).toContain('cron');
+    expect(svc.validateDefinition({ ...linearDef, trigger: { type: 'schedule', cron: '0 9 * * 1-5' } }).ok).toBe(true);
+    expect(svc.validateDefinition({ ...linearDef, trigger: { type: 'event' } }).ok).toBe(false);
+  });
+
+  it('cron 命中当前分钟 → 触发一次；同分钟内再扫不重入', async () => {
+    const { svc, notify } = makeService();
+    const w = svc.create({ name: 'cron流', definition: {
+      name: 'cron流',
+      trigger: { type: 'schedule', cron: '* * * * *' }, // 每分钟都命中
+      steps: [{ id: 'n1', type: 'notify', title: 'cron 触发' }],
+    } });
+    svc.setEnabled(w.id, true);
+    await (svc as unknown as { fireScheduleTriggers(): Promise<void> }).fireScheduleTriggers();
+    expect(notify.create).toHaveBeenCalledTimes(1);
+    await (svc as unknown as { fireScheduleTriggers(): Promise<void> }).fireScheduleTriggers();
+    expect(notify.create).toHaveBeenCalledTimes(1); // 同分钟去重
+  });
+
+  it('cron 不命中 → 不触发', async () => {
+    const { svc, notify } = makeService();
+    const w = svc.create({ name: '不命中', definition: {
+      name: '不命中',
+      trigger: { type: 'schedule', cron: '0 0 1 1 *' }, // 元旦 0 点，当前必不命中
+      steps: [{ id: 'n1', type: 'notify', title: 'x' }],
+    } });
+    svc.setEnabled(w.id, true);
+    await (svc as unknown as { fireScheduleTriggers(): Promise<void> }).fireScheduleTriggers();
+    expect(notify.create).not.toHaveBeenCalled();
+  });
+
+  it('list() 返回触发器摘要', () => {
+    const { svc } = makeService();
+    svc.create({ name: '手', definition: linearDef });
+    svc.create({ name: '周', definition: { ...linearDef, trigger: { type: 'schedule', cron: '0 9 * * 1-5' } } });
+    svc.create({ name: '隔', definition: { ...linearDef, trigger: { type: 'schedule', intervalMinutes: 30 } } });
+    svc.create({ name: '件', definition: { ...linearDef, trigger: { type: 'event', eventType: 'task.failed' } } });
+    const rows = svc.list();
+    const byName = new Map(rows.map((r) => [r.name, r.trigger]));
+    expect(byName.get('手')).toBe('手动');
+    expect(byName.get('周')).toBe('cron 0 9 * * 1-5');
+    expect(byName.get('隔')).toBe('每 30 分钟');
+    expect(byName.get('件')).toBe('事件 task.failed');
+  });
+});

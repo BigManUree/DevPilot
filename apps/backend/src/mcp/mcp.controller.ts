@@ -1,9 +1,10 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Post, Res } from '@nestjs/common';
 
 /**
- * MCP Streamable HTTP 端点（第三阶段 9.20，B3 第一批）：
- * 单端点 POST /api/v1/mcp，接受 JSON-RPC 2.0 请求，application/json 单响应
- * （MCP spec 允许非流式响应；SSE 流式待议）。
+ * MCP Streamable HTTP 端点（第三阶段 9.20，B3 第二批补 SSE 流式）：
+ * - POST /api/v1/mcp：JSON-RPC 2.0 请求。Accept 不含 text/event-stream → application/json 单响应（原行为）；
+ *   含 text/event-stream → text/event-stream 流，响应作为 `event: message` 单帧下发后收流（MCP spec Streamable HTTP）。
+ * - GET /api/v1/mcp：服务端→客户端 SSE 通知流（当前无主动通知，15s keepalive 注释帧保活，断连即清理）。
  * 能力与 scripts/mcp-server.mjs（stdio）一致：tools/resources/prompts。
  * 工具执行经本机 REST 自环（与 stdio server 相同路径，行为一致）。
  */
@@ -67,8 +68,8 @@ async function callTool(name: string, args: Record<string, unknown>) {
 
 @Controller('api/v1/mcp')
 export class McpController {
-  @Post()
-  async handle(@Body() msg: any) {
+  /** JSON-RPC 处理核心（POST 与 SSE 两条传输共用） */
+  private async process(msg: any): Promise<any> {
     const { id, method, params } = msg ?? {};
     const ok = (result: unknown) => ({ jsonrpc: '2.0', id, result });
     const err = (code: number, message: string) => ({ jsonrpc: '2.0', id, error: { code, message } });
@@ -108,5 +109,30 @@ export class McpController {
     } catch (e) {
       return err(-32000, String(e).slice(0, 200));
     }
+  }
+
+  @Post()
+  async handle(@Body() msg: any, @Headers('accept') accept: string | undefined, @Res() res: any) {
+    const out = await this.process(msg);
+    if (accept?.includes('text/event-stream')) {
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.write(`event: message\ndata: ${JSON.stringify(out)}\n\n`);
+      res.end();
+    } else {
+      res.json(out);
+    }
+  }
+
+  /** GET：服务端→客户端 SSE 通知流（keepalive 保活，客户端断连即清理定时器） */
+  @Get()
+  stream(@Res() res: any) {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.write(': devpilot mcp stream open\n\n');
+    const timer = setInterval(() => res.write(': keepalive\n\n'), 15_000);
+    res.on('close', () => clearInterval(timer));
   }
 }
