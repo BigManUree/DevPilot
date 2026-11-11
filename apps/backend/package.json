@@ -7,7 +7,7 @@
     "start:dev": "nest start --watch",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "jest --passWithNoTests"
+    "test": "jest"
   },
   "dependencies": {
     "@devpilot/shared-types": "workspace:*",
@@ -24,8 +24,11 @@
   "devDependencies": {
     "@nestjs/cli": "^10.4.0",
     "@types/better-sqlite3": "^7.6.11",
+    "@types/jest": "^30.0.0",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.2",
+    "jest": "^30.5.2",
+    "ts-jest": "^29.4.15",
     "typescript": "^5.7.0"
   }
 }
