@@ -23,7 +23,9 @@ export class BackendManager {
     if (app.isPackaged) {
       return path.join(process.resourcesPath, 'backend', 'dist', 'main.js');
     }
-    return path.join(__dirname, '../../../backend/dist/main.js');
+    // __dirname = apps/desktop/dist → ../.. = apps → apps/backend/dist/main.js
+    // （旧版多算一级到仓库根，导致 DevPilot\backend\... MODULE_NOT_FOUND）
+    return path.join(__dirname, '../../backend/dist/main.js');
   }
 
   get url(): string {
@@ -44,9 +46,17 @@ export class BackendManager {
     if (await this.probe()) return this.url;
 
     const entry = this.backendEntry();
-    // 打包态用 electron.exe 自身当 node（ELECTRON_RUN_AS_NODE）；开发态 execPath 即 node.exe
-    this.proc = spawn(process.execPath, [entry], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', DEVIPILOT_BACKEND_PORT: String(this.port) },
+    // 打包态：electron.exe 自身当 node（ELECTRON_RUN_AS_NODE=1），better-sqlite3 已按 Electron ABI
+    //   重编译并放在 asarUnpack，直接可用。
+    // 开发态：必须用系统 node——electron 内置 Node 的 ABI 与仓库里 better-sqlite3 产物不匹配
+    //   （实测 NODE_MODULE_VERSION 130 vs 127），重编译会让 CLI 侧又加载不了，两态用不同运行时。
+    const isPackaged = app.isPackaged;
+    const cmd = isPackaged ? process.execPath : 'node';
+    const env: NodeJS.ProcessEnv = { ...process.env, DEVIPILOT_BACKEND_PORT: String(this.port) };
+    if (isPackaged) env.ELECTRON_RUN_AS_NODE = '1';
+    else delete env.ELECTRON_RUN_AS_NODE;
+    this.proc = spawn(cmd, [entry], {
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });

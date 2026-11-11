@@ -6,7 +6,9 @@ import {
   OnGatewayDisconnect,
   OnGatewayInit,
 } from '@nestjs/websockets';
-import { Server } from 'ws';
+import { Server, WebSocket } from 'ws';
+// 显式导入 WebSocket：Electron 内置 Node 20 无全局 WebSocket（Node 22+ 才有），
+// 依赖全局会在桌面壳拉起时于装饰器元数据处 ReferenceError
 import type { DevPilotEvent } from '@devpilot/shared-types';
 
 /**

@@ -38,11 +38,18 @@ function createWindow(backendUrl: string) {
 
 app.whenReady().then(async () => {
   ipcMain.handle('devpilot:getBackendUrl', () => backend.url);
-  const backendUrl = await backend.ensure();
-  createWindow(backendUrl);
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(backendUrl);
-  });
+  try {
+    const backendUrl = await backend.ensure();
+    createWindow(backendUrl);
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow(backendUrl);
+    });
+  } catch (err) {
+    // 后端拉起失败：弹窗可见化而不是静默未处理 rejection 挂死无窗进程
+    const { dialog } = await import('electron');
+    dialog.showErrorBox('DevPilot 后端启动失败', String(err));
+    app.quit();
+  }
 });
 
 app.on('window-all-closed', () => {
