@@ -41,6 +41,21 @@ app.whenReady().then(async () => {
   try {
     const backendUrl = await backend.ensure();
     createWindow(backendUrl);
+    // 自动更新检查（第一批：仅提示，不自动下载）——失败静默（无清单/离线均为正常态）
+    void fetch(`${backendUrl}/api/v1/system/update-check`)
+      .then((r) => r.json())
+      .then((u: { updateAvailable?: boolean; latestVersion?: string; notes?: string }) => {
+        if (u.updateAvailable) {
+          const { dialog } = require('electron') as typeof import('electron');
+          dialog.showMessageBox({
+            type: 'info',
+            message: `DevPilot 有新版本：${u.latestVersion}`,
+            detail: u.notes ?? '可在发布页下载新版本',
+            buttons: ['知道了'],
+          });
+        }
+      })
+      .catch(() => {});
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow(backendUrl);
     });
