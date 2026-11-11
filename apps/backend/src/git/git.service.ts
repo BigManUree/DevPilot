@@ -130,7 +130,7 @@ export class GitService {
     return { ok: r.ok, output: (r.stdout || r.stderr).slice(0, 1000) };
   }
 
-  /** push：默认拒绝，需显式 allowPush（UI 二次确认） */
+  /** push：默认拒绝，需显式 allowPush（UI 二次确认）+ D02 策略五道门 */
   async push(repoPath: string, allowPush: boolean, subjectType: string, subjectId: string) {
     if (!allowPush) {
       this.audit.record({ subject: `${subjectType}:${subjectId}`, action: 'git.push', target: repoPath, result: 'denied', detail: { reason: 'not authorized' } });
@@ -138,8 +138,50 @@ export class GitService {
     }
     const perm = this.checkPermission(subjectType, subjectId);
     if (!perm.allowed) return { ok: false, pendingApproval: true, approvalId: perm.approvalId };
+
+    // D02-1 远程白名单：remote.url 必须在 git_repositories 登记过
+    const rem = await this.run(repoPath, ['remote', 'get-url', 'origin']);
+    const remoteUrl = rem.ok ? rem.stdout.trim() : '';
+    if (!remoteUrl) {
+      this.audit.record({ subject: `${subjectType}:${subjectId}`, action: 'git.push', target: repoPath, result: 'denied', detail: { reason: 'no origin remote' } });
+      return { ok: false, error: 'PUSH_BLOCKED：仓库未配置 origin 远程' };
+    }
+    const whitelisted = this.ds.db.prepare('SELECT id FROM git_repositories WHERE remote_url = ?').get(remoteUrl) as { id: string } | undefined;
+    if (!whitelisted) {
+      this.audit.record({ subject: `${subjectType}:${subjectId}`, action: 'git.push', target: repoPath, result: 'denied', detail: { reason: 'remote not whitelisted', remote: remoteUrl } });
+      return { ok: false, error: `PUSH_BLOCKED：远程 ${remoteUrl} 未在 Git 中心登记（远程白名单策略，D02）` };
+    }
+
+    // D02-2 分支保护：main/master 工作区必须干净；args 由本方法构造，天然无 --force/--delete
+    const branch = (await this.run(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']));
+    const branchName = branch.ok ? branch.stdout.trim() : '';
+    const isProtected = /^(main|master)$/.test(branchName);
+    if (isProtected) {
+      const dirty = await this.run(repoPath, ['status', '--porcelain']);
+      if (dirty.ok && dirty.stdout.trim()) {
+        this.audit.record({ subject: `${subjectType}:${subjectId}`, action: 'git.push', target: repoPath, result: 'denied', detail: { reason: 'dirty worktree on protected branch', branch: branchName } });
+        return { ok: false, error: `PUSH_BLOCKED：保护分支 ${branchName} 存在未提交变更，先 commit 或 stash` };
+      }
+    }
+
+    // D02-3 密钥扫描：推送范围内的提交内容（origin/<branch>..HEAD，无上游则扫全部本地提交的变更）
+    const range = isProtected ? `origin/${branchName}..HEAD` : null;
+    // 扫描源：有上游 ref 用 diff，diff 失败（无上游/新分支）回退 log -p 全量本地提交——fail-closed，绝不静默放行
+    let scan = range
+      ? await this.run(repoPath, ['diff', range, '-U0'])
+      : await this.run(repoPath, ['log', '-p', '--max-count=20']);
+    if (!scan.ok && range) scan = await this.run(repoPath, ['log', '-p', '--max-count=20']);
+    const scanText = scan.ok ? scan.stdout : '';
+    const secretHit = scan.ok ? scanText.match(/sk-[A-Za-z0-9]{8,}|AKIA[A-Z0-9]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----/) : 'SCAN_FAILED';
+    if (secretHit) {
+      this.audit.record({ subject: `${subjectType}:${subjectId}`, action: 'git.push', target: repoPath, result: 'denied', detail: { reason: 'secret pattern in commits', pattern: secretHit[0].slice(0, 12) } });
+      return { ok: false, error: `PUSH_BLOCKED：待推送提交中疑似包含密钥（${secretHit[0].slice(0, 6)}…），已拦截` };
+    }
+
+    // 推送
     const r = await this.run(repoPath, ['push']);
-    this.audit.record({ subject: `${subjectType}:${subjectId}`, action: 'git.push', target: repoPath, result: r.ok ? 'ok' : 'error' });
+    const commits = range ? (await this.run(repoPath, ['rev-list', '--count', range])).stdout.trim() : 'n/a';
+    this.audit.record({ subject: `${subjectType}:${subjectId}`, action: 'git.push', target: repoPath, result: r.ok ? 'ok' : 'error', detail: { remote: remoteUrl, branch: branchName, commits: isProtected ? commits : 'n/a' } });
     return { ok: r.ok, output: (r.stdout || r.stderr).slice(0, 2000) };
   }
 }
