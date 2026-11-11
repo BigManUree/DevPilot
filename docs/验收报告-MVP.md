@@ -6,7 +6,9 @@
 > 脚本：`tests/acceptance.mjs`（可重复运行，幂等设计）
 > 明细数据：`docs/验收报告-MVP.json`
 
-## 1. 验收结果：12/12 PASSED
+## 1. 验收结果：14/14 PASSED
+
+> 首版 12 项（2026-11-10）；S13（共享服务引用保护双项目 fixture）与 S13b（路径重映射导入）于 2026-11-11 加入。
 
 | # | 场景 | 结果 | 证据 |
 |---|---|---|---|
@@ -27,16 +29,29 @@
 
 本次覆盖的门禁项全部 PASSED：未授权命令执行（S5）、误杀外部进程（S6）、备份回滚（S7）、密钥脱敏（S11）、未验证不报成功（Validation 状态机）。
 
-## 3. 未纳入本次自动化（backlog，2026-11-11 刷新）
+## 3. 未纳入本次自动化（backlog，2026-11-11 二次刷新）
 
-- ~~LLM 真实链路（Supervisor 规划执行 / AI 修复全流程）~~：**已完成**（DeepSeek 真实链路接入并验证，见开发日志 P2 批次）。
-- ~~终端 pre+输入框形态~~：**已完成**（xterm.js 终端已上线）。
-- ~~config-center 同名 profile UNIQUE 冲突返回 500~~：**已完成**（2026-11-11 修复，409/404 语义化，7 项接口验证通过，含 local-services / project-services 同类项）。
-- 共享服务引用保护多项目场景：机制已实现（stopService otherRefs 检查），双项目 fixture 自动化用例仍缺。
-- Git 操作保护推送策略细化、插件治理、异常退出恢复（kill -9 后端实测）：属第二/三阶段或建议人工执行。
+首批 backlog 已全部关闭或移交：
+
+- ~~LLM 真实链路~~：**已完成**（P2）。
+- ~~终端 xterm.js~~：**已完成**（P2）。
+- ~~config-center UNIQUE 冲突 500~~：**已完成**（P2，409/404 语义化）。
+- ~~共享服务引用保护多项目场景~~：**已完成**（S13 用例 + force 停止出口，P6/P8）。
+- ~~Git 推送策略~~：**已完成**（D02 五道门实装，P10）。
+- ~~插件治理~~：**已完成**（声明式插件运行时 + 依赖/兼容校验，P13/P16）。
+- ~~异常退出恢复（kill -9 实测）~~：**已完成**（runtime 恢复收敛 + e2e，P7）。
+
+新增/移交（详见 docs/未完成工作清单.md v2）：
+
+- 工作流触发器（schedule/event）与工作流前端页：后端 DSL/引擎/API 已就绪（P18），前端与触发器待做
+- 自动更新下载/替换流水线：检查+提示已就绪（P17），下载替换依赖发布服务器
+- macOS/Linux 适配实证：platform-adapters Posix 实现未在真机验证
+- electron-builder NSIS 安装包（当前 dir target）
 
 ## 4. 已知限制
 
-- 环境检测对未安装工具显示 error（missing/error 细分待细化，需求 7.3）。
-- runTask 无 Key 已改为 {status:'Failed'} 返回。
-- 后端常驻以 scripts/backend-daemon.cmd + WMI 派生方式运行（沙箱内 schtasks 不可用）。
+- ~~环境检测 missing/error 未细分~~：**已完成**（P6，checkProject 返回 missing/errors/problems）。
+- runTask 无 Key 已改为 {status:'Failed'} 返回；规划失败转 WaitingInput 追问（P3）。
+- 后端常驻以 scripts/backend-daemon.cmd + WMI 派生方式运行（沙箱内 schtasks 不可用；派生进程会被延迟回收，见开发日志 P9）。
+- Posix 适配实现未在真机验证（本机 Windows）。
+- S2 存在偶发启动竞态（单次 13/14，复跑 14/14，间歇性非回归）。
