@@ -447,7 +447,16 @@ CREATE TABLE external_tool_actions (
   },
 };
 
-export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5];
+/** V6：插件运行时（第三阶段 9.19）。V2 骨架已建 plugins/plugin_dependencies 表，此处补时间列 */
+const V6: Migration = {
+  version: 6,
+  name: 'plugins-runtime-columns',
+  up: (db) => {
+    db.exec(`ALTER TABLE plugins ADD COLUMN updated_at TEXT;`);
+  },
+};
+
+export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5, V6];
 
 export function openDatabase(dataDir: string): Database.Database {
   fs.mkdirSync(dataDir, { recursive: true });

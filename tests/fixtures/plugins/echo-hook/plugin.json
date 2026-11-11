@@ -1,0 +1,12 @@
+{
+  "id": "echo-hook",
+  "name": "回显插件",
+  "version": "1.0.0",
+  "description": "示例声明式插件：通知落日志、任务失败转发通知",
+  "kind": "hook",
+  "permissions": ["events.subscribe"],
+  "hooks": [
+    { "event": "notification.new", "action": "log" },
+    { "event": "task.failed", "action": "notify", "params": { "title": "任务失败提醒（插件）" } }
+  ]
+}

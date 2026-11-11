@@ -19,9 +19,10 @@ import { ExternalToolsModule } from './externaltools/externaltools.module';
 import { ConfigCenterModule } from './configcenter/configcenter.module';
 import { BackupModule } from './backup/backup.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { PluginsModule } from './plugins/plugins.module';
 
 @Module({
-  imports: [DatabaseModule, EventsModule, LogsModule, PermissionsModule, ProjectsModule, RuntimeModule, TerminalModule, EnvironmentsModule, AgentsModule, DiagnosticsModule, GitModule, WorkspaceModule, MemoryModule, DatabasesModule, ExternalToolsModule, ConfigCenterModule, BackupModule, NotificationsModule],
+  imports: [DatabaseModule, EventsModule, LogsModule, PermissionsModule, ProjectsModule, RuntimeModule, TerminalModule, EnvironmentsModule, AgentsModule, DiagnosticsModule, GitModule, WorkspaceModule, MemoryModule, DatabasesModule, ExternalToolsModule, ConfigCenterModule, BackupModule, NotificationsModule, PluginsModule],
   controllers: [HealthController, SystemController],
 })
 export class AppModule {}
