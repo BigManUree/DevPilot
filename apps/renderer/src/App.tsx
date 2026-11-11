@@ -1438,6 +1438,55 @@ function MemoryPage() {
   );
 }
 
+/* ---------- 插件中心 ---------- */
+function PluginsCenterPage() {
+  const [rows, setRows] = useState<any[]>([]);
+  const [reloadInfo, setReloadInfo] = useState<string>('');
+
+  const load = React.useCallback(async () => setRows(await api('/plugins')), []);
+  useEffect(() => { void load(); }, [load]);
+
+  const reload = async () => {
+    const r = await api<{ installed: number; rejected: Array<{ dir: string; error: string }> }>('/plugins/reload', 'POST');
+    const rej = r.rejected.length ? `，${r.rejected.length} 个被拒绝：${r.rejected.map((x) => `${x.dir}(${x.error})`).join('；')}` : '';
+    setReloadInfo(`已安装 ${r.installed} 个${rej}`);
+    void load();
+  };
+  const toggle = async (row: any) => {
+    await api(`/plugins/${row.id}/${row.enabled ? 'disable' : 'enable'}`, 'POST');
+    void load();
+  };
+
+  return (
+    <Space direction="vertical" style={{ width: '100%' }}>
+      <Card size="small" title="插件中心（本地声明式插件）"
+        extra={<Space>
+          <Button size="small" onClick={reload}>扫描安装（reload）</Button>
+          <Button size="small" onClick={() => void load()}>刷新</Button>
+        </Space>}>
+        {reloadInfo && <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>{reloadInfo}</Typography.Paragraph>}
+        <Table rowKey="id" size="small" pagination={false} dataSource={rows}
+          columns={[
+            { title: 'ID', dataIndex: 'id' },
+            { title: '名称', dataIndex: 'name' },
+            { title: '版本', dataIndex: 'version', width: 90 },
+            { title: '权限', dataIndex: 'permissions', render: (p: string[]) => (p ?? []).map((x) => <Tag key={x}>{x}</Tag>) },
+            { title: '事件钩子', dataIndex: 'hooks', render: (hooks: any[]) => (hooks ?? []).map((h, i) => (
+              <Tag key={i} color="blue">{h.event} → {h.action}</Tag>
+            )) },
+            { title: '状态', dataIndex: 'enabled', width: 90, render: (e: boolean) => e ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> },
+            { title: '操作', width: 90, render: (_, r) => (
+              <Button size="small" type={r.enabled ? 'default' : 'primary'} onClick={() => void toggle(r)}>{r.enabled ? '停用' : '启用'}</Button>
+            ) },
+          ]} />
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+          插件目录：%APPDATA%\devpilot\data\plugins\&lt;id&gt;\plugin.json（事件钩子为声明式：log / notify / command，command 走审批双门）
+        </Typography.Paragraph>
+      </Card>
+    </Space>
+  );
+}
+
 /* ---------- 主布局 ---------- */
 const NAV = [
   { key: '1', label: '首页工作台' },
@@ -1458,6 +1507,7 @@ const NAV = [
   { key: '16', label: '通知中心' },
   { key: '17', label: 'Agent 中心' },
   { key: '18', label: '记忆系统' },
+  { key: '19', label: '插件中心' },
 ];
 
 export default function App() {
@@ -1490,6 +1540,7 @@ export default function App() {
       case '16': return <NotificationCenterPage />;
       case '17': return <AgentsCenterPage />;
       case '18': return <MemoryPage />;
+      case '19': return <PluginsCenterPage />;
       default: return null;
     }
   };
