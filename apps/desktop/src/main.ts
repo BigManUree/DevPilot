@@ -12,6 +12,8 @@ function createWindow(backendUrl: string) {
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
+    // 窗口/任务栏图标：打包态用 exe 内嵌图标（Windows 默认取 exe），开发态指向 build/icon.png
+    icon: app.isPackaged ? undefined : path.join(__dirname, '../build/icon.png'),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

@@ -26,6 +26,11 @@ tests/fixtures/git-demo/
 tests/fixtures/.devpilot-backup/
 
 # electron-builder 打包产物
-apps/desktop/release/
-apps/desktop/release2/
+apps/desktop/release*/
 apps/desktop/resources-backend/
+apps/desktop/resources-backend.trash-*/
+
+# 打包图标必须入库（build/ 整体忽略，但图标是打包输入）
+!apps/desktop/build/
+apps/desktop/build/*
+!apps/desktop/build/icon.png
