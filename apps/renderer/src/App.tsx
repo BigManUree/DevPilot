@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ConfigProvider, Layout, Menu, Typography, Table, Button, Input, Space, Tag, Card,
-  Modal, message, List, Tabs, Descriptions, Select, Badge,
+  Modal, message, List, Tabs, Descriptions, Select, Badge, Steps, Result,
 } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { api, wsUrl } from './api';
@@ -13,6 +13,7 @@ const statusColor: Record<string, string> = {
   Running: 'green', Starting: 'blue', Stopping: 'orange',
   Failed: 'red', Unhealthy: 'volcano', Stopped: 'default', Unknown: 'default',
   Completed: 'green', Pending: 'default', Preparing: 'blue', WaitingApproval: 'orange',
+  Paused: 'orange', WaitingInput: 'purple',
   Failed_: 'red', Cancelled: 'default', PASSED: 'green', PARTIAL: 'orange',
 };
 
@@ -196,8 +197,21 @@ function Projects() {
 function Tasks() {
   const [tasks, setTasks] = useState<any[]>([]);
   const [detail, setDetail] = useState<any>(null);
+  const [askTask, setAskTask] = useState<any>(null);
+  const [answer, setAnswer] = useState('');
   const load = React.useCallback(async () => setTasks(await api('/tasks')), []);
   useEffect(() => { void load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, [load]);
+
+  const submitAnswer = async () => {
+    if (!askTask || !answer.trim()) return;
+    try {
+      const r = await api<any>(`/tasks/${askTask.id}/respond-input`, 'POST', { answer, run: false });
+      message.success(`补充已提交（状态 → ${r.status}），可在操作列点击「执行」继续`);
+    } catch (e: any) {
+      message.error('提交失败：' + (e?.message ?? String(e)));
+    }
+    setAskTask(null); setAnswer(''); void load();
+  };
 
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
@@ -211,8 +225,21 @@ function Tasks() {
             title: '操作', render: (_, r) => (
               <Space>
                 <Button size="small" onClick={async () => setDetail(await api(`/tasks/${r.id}`))}>详情</Button>
-                <Button size="small" onClick={async () => { await api(`/tasks/${r.id}/run`, 'POST'); void load(); }}>执行</Button>
-                <Button size="small" danger onClick={async () => { await api(`/tasks/${r.id}/cancel`, 'POST'); void load(); }}>取消</Button>
+                {['Pending', 'WaitingInput'].includes(r.status) && (
+                  <Button size="small" type="primary" onClick={async () => { await api(`/tasks/${r.id}/run`, 'POST'); void load(); }}>执行</Button>
+                )}
+                {['Running', 'Preparing'].includes(r.status) && (
+                  <Button size="small" onClick={async () => { await api(`/tasks/${r.id}/pause`, 'POST'); void load(); }}>暂停</Button>
+                )}
+                {r.status === 'Paused' && (
+                  <Button size="small" type="primary" onClick={async () => { await api(`/tasks/${r.id}/resume`, 'POST'); void load(); }}>恢复</Button>
+                )}
+                {r.status === 'WaitingInput' && (
+                  <Button size="small" type="primary" onClick={() => { setAskTask(r); setAnswer(''); }}>补充信息</Button>
+                )}
+                {['Pending', 'Preparing', 'Running', 'Paused', 'WaitingApproval', 'WaitingInput'].includes(r.status) && (
+                  <Button size="small" danger onClick={async () => { await api(`/tasks/${r.id}/cancel`, 'POST'); void load(); }}>取消</Button>
+                )}
               </Space>
             ),
           },
@@ -232,6 +259,11 @@ function Tasks() {
             { key: 'task', label: '任务', children: <pre style={{ maxHeight: 300, overflow: 'auto' }}>{JSON.stringify(detail.task, null, 2)}</pre> },
           ]} />
         )}
+      </Modal>
+      <Modal open={!!askTask} onCancel={() => setAskTask(null)} onOk={submitAnswer} okText="提交并转待执行"
+        title={`补充信息 — ${askTask?.input_summary?.slice(0, 40) ?? ''}`}>
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>{askTask?.result_summary}</Typography.Paragraph>
+        <Input.TextArea rows={4} placeholder="补充任务目标、涉及路径、前置条件等" value={answer} onChange={(e) => setAnswer(e.target.value)} />
       </Modal>
     </Space>
   );
@@ -485,7 +517,7 @@ function Environments() {
 }
 
 /* ---------- 系统设置 ---------- */
-function Settings() {
+function Settings({ rerunOnboarding }: { rerunOnboarding: () => void }) {
   const [st, setSt] = useState<any>(null);
   const [key, setKey] = useState('');
   useEffect(() => { void api('/models/status').then(setSt); }, []);
@@ -508,6 +540,10 @@ function Settings() {
           <Input.Password placeholder="sk-..." value={key} onChange={(e) => setKey(e.target.value)} onPressEnter={save} />
           <Button type="primary" onClick={save}>保存</Button>
         </Space.Compact>
+      </Card>
+      <Card size="small" title="首次启动引导">
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>重跑初始化检查 → 模型配置 → 环境/工具检测 → 项目导入的五步引导。</Typography.Paragraph>
+        <Button onClick={rerunOnboarding}>重新运行引导</Button>
       </Card>
     </Space>
   );
@@ -1030,6 +1066,128 @@ function NotificationCenterPage() {
   );
 }
 
+/* ---------- 首次启动引导（WF-01，P0 #17） ---------- */
+function FirstRunWizard({ onFinish }: { onFinish: () => void }) {
+  const [step, setStep] = useState(0);
+  const [health, setHealth] = useState<any>(null);
+  const [modelSt, setModelSt] = useState<any>(null);
+  const [apiKey, setApiKey] = useState('');
+  const [envTools, setEnvTools] = useState<any[]>([]);
+  const [extTools, setExtTools] = useState<any[]>([]);
+  const [importPath, setImportPath] = useState('');
+  const [importing, setImporting] = useState(false);
+
+  const steps = [
+    { title: '初始化检查' }, { title: '模型配置' }, { title: '环境检测' }, { title: '工具检测' }, { title: '导入项目' },
+  ];
+
+  // 进入每步时拉取对应数据
+  useEffect(() => {
+    if (step === 0) void api('/health').then(setHealth).catch(() => setHealth({ error: true }));
+    if (step === 1) void api('/models/status').then(setModelSt);
+    if (step === 2) void api<any[]>('/environments').then(setEnvTools);
+    if (step === 3) void api<any[]>('/external-tools').then(setExtTools);
+  }, [step]);
+
+  const saveKey = async () => {
+    if (!apiKey.trim()) return message.warning('请输入 API Key');
+    await api('/models/config', 'POST', { apiKey });
+    setApiKey('');
+    setModelSt(await api('/models/status'));
+    message.success('Key 已保存');
+  };
+
+  const doImport = async () => {
+    if (!importPath.trim()) return message.warning('请填写项目根目录路径');
+    setImporting(true);
+    try {
+      const r = await api<{ projectId: string; analysis: any }>('/projects/import', 'POST', { source: 'folder', rootPath: importPath });
+      message.success(`导入成功：识别 ${r.analysis.services.length} 个服务`);
+    } catch {
+      message.error('导入失败（检查路径是否有效）');
+    }
+    setImporting(false);
+  };
+
+  const finish = () => {
+    localStorage.setItem('devpilot.onboarded', '1');
+    onFinish();
+  };
+
+  const nextText = step === steps.length - 1 ? '完成引导' : '下一步';
+  const canNext = step !== 1 || !!modelSt?.keyConfigured;
+
+  return (
+    <div style={{ maxWidth: 720, margin: '60px auto', padding: 24 }}>
+      <Card>
+        <Typography.Title level={3} style={{ marginTop: 0 }}>欢迎使用 DevPilot</Typography.Title>
+        <Typography.Paragraph type="secondary">首次启动引导将带你完成 5 步初始化配置。</Typography.Paragraph>
+        <Steps current={step} items={steps.map((s) => ({ key: s.title, title: s.title }))} style={{ margin: '16px 0 24px' }} />
+        {step === 0 && (health ? (
+          health.error ? <Result status="error" title="后端服务不可达" subTitle="请确认后端已启动（scripts/start-backend.cmd）后点击「下一步」重试" />
+            : <Result status="success" title={`后端就绪（v${health.version ?? '?'}）`} subTitle={`状态 ${health.status ?? 'ok'} · 数据库与运行时初始化完成`} />
+        ) : <Typography.Text type="secondary">正在检查后端…</Typography.Text>)}
+        {step === 1 && (
+          <Space direction="vertical" style={{ width: '100%' }}>
+            <Descriptions size="small" column={2}>
+              <Descriptions.Item label="供应商">{modelSt?.provider ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label="模型">{modelSt?.model ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label="Key 状态">{modelSt?.keyConfigured ? '已配置' : '未配置'}</Descriptions.Item>
+            </Descriptions>
+            {!modelSt?.keyConfigured && (
+              <>
+                <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>配置 DeepSeek API Key 后 Supervisor 才能规划执行任务。也可在「系统设置」中随时补配。</Typography.Paragraph>
+                <Space.Compact style={{ width: '100%' }}>
+                  <Input.Password placeholder="sk-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)} onPressEnter={saveKey} />
+                  <Button type="primary" onClick={saveKey}>保存</Button>
+                </Space.Compact>
+              </>
+            )}
+          </Space>
+        )}
+        {step === 2 && (
+          <>
+            <Typography.Paragraph type="secondary">开发环境探针结果（未安装的工具不影响使用，按需安装即可）：</Typography.Paragraph>
+            <Table rowKey="id" size="small" pagination={false} dataSource={envTools}
+              columns={[
+                { title: '工具', dataIndex: 'name' },
+                { title: '状态', dataIndex: 'status', render: (s) => <Tag color={s === 'ok' ? 'green' : s === 'missing' ? 'default' : 'red'}>{s === 'ok' ? '可用' : s === 'missing' ? '未安装' : '异常'}</Tag> },
+                { title: '版本', dataIndex: 'version', render: (v) => v ?? '-' },
+              ]} />
+          </>
+        )}
+        {step === 3 && (
+          <>
+            <Typography.Paragraph type="secondary">外部工具联动探测（IDE / 浏览器 / 模拟器等，可在「外部工具」页深度配置）：</Typography.Paragraph>
+            <Table rowKey="id" size="small" pagination={false} dataSource={extTools}
+              columns={[
+                { title: '工具', dataIndex: 'name' },
+                { title: '类别', dataIndex: 'kind' },
+                { title: '状态', dataIndex: 'status', render: (s) => <Tag color={s === 'ok' ? 'green' : 'default'}>{s === 'ok' ? '可用' : '未找到'}</Tag> },
+              ]} />
+          </>
+        )}
+        {step === 4 && (
+          <Space direction="vertical" style={{ width: '100%' }}>
+            <Typography.Paragraph type="secondary">导入第一个项目（可跳过，之后在「项目管理」页随时导入）：</Typography.Paragraph>
+            <Space.Compact style={{ width: '100%' }}>
+              <Input placeholder="项目根目录绝对路径" value={importPath} onChange={(e) => setImportPath(e.target.value)} onPressEnter={doImport} />
+              <Button type="primary" loading={importing} onClick={doImport}>导入并识别</Button>
+            </Space.Compact>
+          </Space>
+        )}
+        <div style={{ marginTop: 24, textAlign: 'right' }}>
+          <Space>
+            {step > 0 && <Button onClick={() => setStep(step - 1)}>上一步</Button>}
+            {step < steps.length - 1 && <Button onClick={finish}>跳过引导</Button>}
+            <Button type="primary" disabled={!canNext} onClick={() => (step === steps.length - 1 ? finish() : setStep(step + 1))}>{nextText}</Button>
+          </Space>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 /* ---------- 主布局 ---------- */
 const NAV = [
   { key: '1', label: '首页工作台' },
@@ -1052,6 +1210,14 @@ const NAV = [
 
 export default function App() {
   const [page, setPage] = useState('1');
+  const [onboarded, setOnboarded] = useState(() => {
+    try { return localStorage.getItem('devpilot.onboarded') === '1'; } catch { return false; }
+  });
+  const finishOnboarding = () => setOnboarded(true);
+  const rerunOnboarding = () => {
+    try { localStorage.removeItem('devpilot.onboarded'); } catch { /* 忽略 */ }
+    setOnboarded(false);
+  };
   const render = () => {
     switch (page) {
       case '1': return <Dashboard go={setPage} />;
@@ -1062,7 +1228,7 @@ export default function App() {
       case '6': return <Logs />;
       case '7': return <Approvals />;
       case '8': return <Environments />;
-      case '9': return <Settings />;
+      case '9': return <Settings rerunOnboarding={rerunOnboarding} />;
       case '10': return <GitCenter />;
       case '11': return <CodeWorkspace />;
       case '12': return <DatabasesCenter />;
@@ -1073,6 +1239,7 @@ export default function App() {
       default: return null;
     }
   };
+  if (!onboarded) return <ConfigProvider locale={zhCN}><FirstRunWizard onFinish={finishOnboarding} /></ConfigProvider>;
   return (
     <ConfigProvider locale={zhCN}>
       <Layout style={{ height: '100vh' }}>
