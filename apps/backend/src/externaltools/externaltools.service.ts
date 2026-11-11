@@ -1,10 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { exec, execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { AuditService } from '../permissions/audit.service';
 import { LogService } from '../logs/log.service';
+import { DatabaseService } from '../database/database.module';
 import { platform as plat } from '@devpilot/platform-adapters';
 
 const run = promisify(execFile);
@@ -28,6 +30,7 @@ export interface ExternalTool {
 @Injectable()
 export class ExternalToolsService {
   constructor(
+    private readonly ds: DatabaseService,
     private readonly audit: AuditService,
     private readonly logs: LogService,
   ) {}
@@ -146,5 +149,61 @@ export class ExternalToolsService {
     this.audit.record({ subject: 'user:local-user', action: 'external-tool.launch-emulator', target: avd, result: 'ok' });
     this.logs.log({ level: 'info', sourceModule: 'external-tools', message: `emulator launched: ${avd}` });
     return { ok: true, avd };
+  }
+
+  // ---- 命令级联动（需求 7.2 分级 2 级）：为工具配置动作命令模板并执行取回结果 ----
+
+  listActions(toolId: string) {
+    return this.ds.db.prepare('SELECT * FROM external_tool_actions WHERE tool_id = ? ORDER BY action_name').all(toolId);
+  }
+
+  createAction(toolId: string, body: { actionName: string; commandTemplate: string; timeoutMs?: number }) {
+    if (!body.actionName?.trim() || !body.commandTemplate?.trim()) {
+      throw new ConflictException('动作名与命令模板不能为空');
+    }
+    const dup = this.ds.db.prepare('SELECT id FROM external_tool_actions WHERE tool_id = ? AND action_name = ?')
+      .get(toolId, body.actionName) as { id: string } | undefined;
+    if (dup) throw new ConflictException(`同名动作已存在：${toolId}/${body.actionName}`);
+    const id = randomUUID();
+    this.ds.db.prepare(
+      `INSERT INTO external_tool_actions (id, tool_id, action_name, command_template, timeout_ms, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(id, toolId, body.actionName, body.commandTemplate, body.timeoutMs ?? 30000, new Date().toISOString());
+    return { id };
+  }
+
+  removeAction(toolId: string, actionId: string) {
+    const r = this.ds.db.prepare('DELETE FROM external_tool_actions WHERE tool_id = ? AND id = ?').run(toolId, actionId);
+    if (r.changes === 0) throw new NotFoundException(`动作不存在：${toolId}/${actionId}`);
+    return { ok: true };
+  }
+
+  /** 执行动作：命令模板支持 {install_path}（工具探测到的可执行目录）与 {workdir} 占位；走适配层 shell */
+  async runAction(toolId: string, actionId: string, vars?: Record<string, string>): Promise<{ ok: boolean; stdout?: string; stderr?: string; exitCode?: number | null; error?: string }> {
+    const action = this.ds.db.prepare('SELECT * FROM external_tool_actions WHERE tool_id = ? AND id = ?').get(toolId, actionId) as
+      | { id: string; action_name: string; command_template: string; timeout_ms: number } | undefined;
+    if (!action) throw new NotFoundException(`动作不存在：${toolId}/${actionId}`);
+    const tools = await this.detectTools();
+    const tool = tools.find((t) => t.id === toolId);
+    const installPath = tool?.exePath ? path.dirname(tool.exePath) : '';
+    let command = action.command_template
+      .replace('{install_path}', installPath)
+      .replace('{workdir}', process.cwd());
+    for (const [k, v] of Object.entries(vars ?? {})) command = command.replaceAll(`{${k}}`, v);
+
+    try {
+      const { stdout, stderr } = await shellExec(command,
+        { timeout: action.timeout_ms, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+      this.audit.record({ subject: 'user:local-user', action: 'external-tool.action.run', target: `${toolId}/${action.action_name}`, result: 'ok' });
+      return { ok: true, stdout: stdout.slice(0, 60000), stderr: stderr.slice(0, 20000), exitCode: 0 };
+    } catch (err: any) {
+      const code = typeof err?.code === 'number' ? err.code : null;
+      this.audit.record({ subject: 'user:local-user', action: 'external-tool.action.run', target: `${toolId}/${action.action_name}`, result: code === 0 ? 'ok' : 'error', detail: { exitCode: code } });
+      if (code !== null && (err.stdout !== undefined || err.stderr !== undefined)) {
+        // 非零退出但有输出：回传结果（命令级联动取回构建/状态结果的关键路径）
+        return { ok: false, stdout: String(err.stdout ?? '').slice(0, 60000), stderr: String(err.stderr ?? '').slice(0, 20000), exitCode: code };
+      }
+      return { ok: false, error: String(err?.message ?? err).slice(0, 500) };
+    }
   }
 }

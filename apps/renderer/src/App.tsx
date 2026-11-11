@@ -879,7 +879,71 @@ function ExternalToolsPage() {
           ))}
         </Space>
       </Card>
+      <CommandActionsCard tools={tools} />
     </Space>
+  );
+}
+
+/* ---------- 外部工具命令级联动（需求 7.2 分级 2 级） ---------- */
+function CommandActionsCard({ tools }: { tools: any[] }) {
+  const [toolId, setToolId] = useState<string | undefined>(undefined);
+  const [actions, setActions] = useState<any[]>([]);
+  const [actionName, setActionName] = useState('');
+  const [cmdTpl, setCmdTpl] = useState('');
+  const [runResult, setRunResult] = useState<any>(null);
+
+  const load = React.useCallback(async () => {
+    if (!toolId) { setActions([]); return; }
+    setActions(await api(`/external-tools/${toolId}/actions`));
+  }, [toolId]);
+  useEffect(() => { void load(); }, [load]);
+
+  const create = async () => {
+    if (!toolId || !actionName.trim() || !cmdTpl.trim()) return message.warning('选择工具并填写动作名与命令模板');
+    try {
+      await api(`/external-tools/${toolId}/actions`, 'POST', { actionName, commandTemplate: cmdTpl });
+      setActionName(''); setCmdTpl('');
+      message.success('动作已保存');
+      void load();
+    } catch { message.error('保存失败（同名？）'); }
+  };
+  const run = async (actionId: string) => {
+    setRunResult({ running: true });
+    const r = await api<any>(`/external-tools/${toolId}/actions/${actionId}/run`, 'POST', {});
+    setRunResult(r);
+    r.ok ? message.success('执行完成') : message.warning(`退出码 ${r.exitCode ?? '?'}${r.error ? '：' + r.error : ''}`);
+  };
+
+  return (
+    <Card size="small" title="命令级联动（构建 / 运行 / 状态查询）">
+      <Space wrap style={{ marginBottom: 12 }}>
+        <Select placeholder="选择工具" style={{ width: 180 }} value={toolId}
+          onChange={(v) => setToolId(v)}
+          options={tools.filter((t) => t.status === 'ok').map((t) => ({ value: t.id, label: t.name }))} />
+        <Input placeholder="动作名，如 build / status" style={{ width: 160 }} value={actionName} onChange={(e) => setActionName(e.target.value)} />
+        <Input placeholder="命令模板（{install_path} = 工具安装目录）" style={{ width: 380 }} value={cmdTpl} onChange={(e) => setCmdTpl(e.target.value)} onPressEnter={create} />
+        <Button type="primary" onClick={create}>保存动作</Button>
+      </Space>
+      {actions.length > 0 && (
+        <Table rowKey="id" size="small" pagination={false} dataSource={actions} style={{ marginBottom: 12 }}
+          columns={[
+            { title: '动作', dataIndex: 'action_name', width: 120 },
+            { title: '命令', dataIndex: 'command_template', ellipsis: true },
+            { title: '超时', dataIndex: 'timeout_ms', width: 80, render: (v) => `${v}ms` },
+            { title: '操作', width: 130, render: (_, r) => (
+              <Space>
+                <Button size="small" type="primary" onClick={() => void run(r.id)}>执行</Button>
+                <Button size="small" danger onClick={async () => { await api(`/external-tools/${toolId}/actions/${r.id}`, 'DELETE'); void load(); }}>删除</Button>
+              </Space>
+            ) },
+          ]} />
+      )}
+      {runResult && !runResult.running && (
+        <pre style={{ maxHeight: 220, overflow: 'auto', background: 'rgba(0,0,0,0.04)', padding: 8, borderRadius: 4, fontSize: 12 }}>
+          {runResult.error ? `错误：${runResult.error}` : `exit=${runResult.exitCode}\n${runResult.stdout || ''}${runResult.stderr ? '\n[stderr] ' + runResult.stderr : ''}`}
+        </pre>
+      )}
+    </Card>
   );
 }
 
@@ -1032,12 +1096,27 @@ function BackupCenterPage() {
 function NotificationCenterPage() {
   const [rows, setRows] = useState<any[]>([]);
   const [unread, setUnread] = useState(0);
+  const [rules, setRules] = useState<any[]>([]);
+  const [ruleName, setRuleName] = useState('');
+  const [ruleType, setRuleType] = useState('*');
+  const [rulePri, setRulePri] = useState<number>(5);
 
   const load = React.useCallback(async () => {
     setRows(await api('/notifications'));
     setUnread(await api('/notifications/unread-count'));
+    setRules(await api('/notifications/rules'));
   }, []);
   useEffect(() => { void load(); const t = setInterval(load, 4000); return () => clearInterval(t); }, [load]);
+
+  const createRule = async () => {
+    if (!ruleName.trim()) return message.warning('请填写规则名称');
+    try {
+      await api('/notifications/rules', 'POST', { name: ruleName, typePattern: ruleType, minPriority: rulePri });
+      setRuleName('');
+      message.success('规则已创建');
+      void load();
+    } catch { message.error('创建失败（名称重复？）'); }
+  };
 
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
@@ -1061,6 +1140,32 @@ function NotificationCenterPage() {
             />
           </List.Item>
         )} />
+      </Card>
+      <Card size="small" title="通知规则订阅">
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
+          存在启用规则时，仅命中规则的通知会送达（类型支持 * 与前缀通配如 task.*；紧急阈值：优先级 ≤ 阈值才收）。无规则时全量接收。
+        </Typography.Paragraph>
+        <Space wrap style={{ marginBottom: 12 }}>
+          <Input placeholder="规则名" style={{ width: 160 }} value={ruleName} onChange={(e) => setRuleName(e.target.value)} onPressEnter={createRule} />
+          <Input placeholder="类型模式，如 task.* 或 *" style={{ width: 200 }} value={ruleType} onChange={(e) => setRuleType(e.target.value)} />
+          <Select style={{ width: 130 }} value={rulePri} onChange={setRulePri}
+            options={[1, 2, 3, 4, 5].map((v) => ({ value: v, label: `紧急阈值 ≤${v}` }))} />
+          <Button type="primary" onClick={createRule}>创建规则</Button>
+        </Space>
+        <Table rowKey="id" size="small" pagination={false} dataSource={rules}
+          locale={{ emptyText: '暂无规则（全量接收）' }}
+          columns={[
+            { title: '名称', dataIndex: 'name' },
+            { title: '类型模式', dataIndex: 'type_pattern' },
+            { title: '紧急阈值', dataIndex: 'min_priority', render: (v) => `≤${v}` },
+            { title: '状态', dataIndex: 'enabled', render: (v) => <Tag color={v ? 'green' : 'default'}>{v ? '启用' : '停用'}</Tag> },
+            { title: '操作', render: (_, r) => (
+              <Space>
+                <Button size="small" onClick={async () => { await api(`/notifications/rules/${r.id}/update`, 'POST', { enabled: !r.enabled }); void load(); }}>{r.enabled ? '停用' : '启用'}</Button>
+                <Button size="small" danger onClick={async () => { await api(`/notifications/rules/${r.id}`, 'DELETE'); void load(); }}>删除</Button>
+              </Space>
+            ) },
+          ]} />
       </Card>
     </Space>
   );

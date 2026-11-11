@@ -418,7 +418,36 @@ CREATE TABLE env_profiles (
   },
 };
 
-export const MIGRATIONS: Migration[] = [V1, V2, V3, V4];
+/** V5：通知规则订阅 + 外部工具命令级联动动作 */
+const V5: Migration = {
+  version: 5,
+  name: 'notification-rules-and-tool-actions',
+  up: (db) => {
+    db.exec(`
+CREATE TABLE notification_rules (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  type_pattern TEXT NOT NULL DEFAULT '*',
+  project_id TEXT,
+  min_priority INTEGER NOT NULL DEFAULT 5,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE external_tool_actions (
+  id TEXT PRIMARY KEY,
+  tool_id TEXT NOT NULL,
+  action_name TEXT NOT NULL,
+  command_template TEXT NOT NULL,
+  timeout_ms INTEGER NOT NULL DEFAULT 30000,
+  created_at TEXT NOT NULL,
+  UNIQUE(tool_id, action_name)
+);
+`);
+  },
+};
+
+export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5];
 
 export function openDatabase(dataDir: string): Database.Database {
   fs.mkdirSync(dataDir, { recursive: true });

@@ -24,6 +24,23 @@ export class NotificationsController {
   @Post('read-all')
   markAllRead() { return this.svc.markAllRead(); }
 
+  // ---- 通知规则订阅（二阶段 #6）----
+  @Get('rules')
+  listRules() { return this.svc.listRules(); }
+
+  @Post('rules')
+  createRule(@Body() body: { name: string; typePattern?: string; projectId?: string; minPriority?: number }) {
+    return this.svc.createRule(body);
+  }
+
+  @Post('rules/:id/update')
+  updateRule(@Param('id') id: string, @Body() body: { enabled?: boolean; minPriority?: number; typePattern?: string }) {
+    return this.svc.updateRule(id, body);
+  }
+
+  @Delete('rules/:id')
+  removeRule(@Param('id') id: string) { return this.svc.removeRule(id); }
+
   @Delete(':id')
   remove(@Param('id') id: string) { return this.svc.remove(id); }
 }

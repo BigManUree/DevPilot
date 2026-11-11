@@ -1,4 +1,4 @@
-import { Injectable, OnApplicationShutdown } from '@nestjs/common';
+import { Injectable, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { spawn, ChildProcess } from 'node:child_process';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
@@ -24,7 +24,7 @@ interface TrackedProcess {
  * - 共享服务保护：被其他项目引用时停止单项目不停止共享服务
  */
 @Injectable()
-export class RuntimeService implements OnApplicationShutdown {
+export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
   private tracked = new Map<string, TrackedProcess>(); // serviceId → process
 
   constructor(
@@ -37,6 +37,25 @@ export class RuntimeService implements OnApplicationShutdown {
   onApplicationShutdown() {
     // 后端退出清理：终止全部会话进程
     for (const t of this.tracked.values()) this.killProcessTree(t.child.pid);
+  }
+
+  /** 异常退出恢复（测试场景 20）：后端被 kill -9 后重启，tracked 会话已丢失，
+   *  收敛残留的非终态服务状态并关闭未结束的会话记录。
+   *  孤儿子进程（Windows 下父死后仍存活）按 S6 安全设计不主动杀——留给运行中心显式接管。 */
+  onModuleInit() {
+    const stale = this.ds.db
+      .prepare(`SELECT id, name, status FROM project_services WHERE status IN ('Running','Starting','Stopping','Unhealthy')`)
+      .all() as Array<{ id: string; name: string; status: string }>;
+    for (const s of stale) {
+      this.setStatus(s.id, 'Stopped');
+      this.logs.log({ level: 'warn', sourceModule: 'runtime.recovery', message: `服务 ${s.name} 状态收敛 Running(${s.status})→Stopped（后端重启恢复）` });
+    }
+    const closed = this.ds.db
+      .prepare('UPDATE runtime_sessions SET stopped_at = ? WHERE stopped_at IS NULL')
+      .run(new Date().toISOString());
+    if (stale.length || closed.changes) {
+      this.logs.log({ level: 'info', sourceModule: 'runtime.recovery', message: `异常退出恢复完成：收敛服务 ${stale.length} 个、关闭会话 ${closed.changes} 个` });
+    }
   }
 
   /** 拓扑排序：depends_on 声明依赖；环检测失败抛错 */
