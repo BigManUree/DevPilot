@@ -7,7 +7,7 @@ function makeService(modelOverrides: Record<string, unknown> = {}) {
     stub(ds),
     stub({}),                                                   // perms
     stub({ call: jest.fn() }),                                  // gateway
-    stub({ hasKey: () => true, chat: jest.fn(), ...modelOverrides }), // model
+    stub({ hasKey: () => true, loadKeyFromStore: async () => false, chat: jest.fn(), ...modelOverrides }), // model
     stub({}),                                                   // logs
     stub({ broadcast: jest.fn() }),                             // events
     stub({ record: jest.fn() }),                                // audit

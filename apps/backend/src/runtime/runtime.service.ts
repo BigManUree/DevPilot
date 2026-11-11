@@ -164,14 +164,14 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
   }
 
   /** 停止单个服务：共享服务引用保护 */
-  async stopService(serviceId: string): Promise<{ stopped: boolean; reason?: string }> {
+  async stopService(serviceId: string, force = false): Promise<{ stopped: boolean; reason?: string }> {
     const svc = this.ds.db.prepare('SELECT * FROM project_services WHERE id = ?').get(serviceId) as
       | { id: string; project_id: string; name: string; shared: number }
       | undefined;
     if (!svc) throw new Error('service not found');
 
-    // 共享服务保护：其他项目是否依赖同名服务
-    if (svc.shared) {
+    // 共享服务保护：其他项目是否依赖同名服务；force=true 由用户显式解除保护（落审计）
+    if (svc.shared && !force) {
       const otherRefs = this.ds.db
         .prepare(
           `SELECT COUNT(*) n FROM project_services ps
@@ -188,6 +188,9 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     if (!t) {
       this.setStatus(serviceId, 'Stopped');
       return { stopped: true };
+    }
+    if (force) {
+      this.audit.record({ subject: 'user:local-user', action: 'service.stop.force', target: svc.name, result: 'ok', detail: { serviceId } });
     }
     this.setStatus(serviceId, 'Stopping');
 

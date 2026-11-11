@@ -11,8 +11,8 @@ export class RuntimeController {
   }
 
   @Post('services/:serviceId/stop')
-  stopService(@Param('serviceId') serviceId: string) {
-    return this.svc.stopService(serviceId);
+  stopService(@Param('serviceId') serviceId: string, @Body() body: { force?: boolean }) {
+    return this.svc.stopService(serviceId, body?.force === true);
   }
 
   @Post('projects/:projectId/start')

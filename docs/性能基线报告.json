@@ -1,0 +1,38 @@
+{
+  "date": "2026-11-11T06:29:38.419Z",
+  "machine": "Windows (target hardware: local dev machine)",
+  "apiLatencyMs": {
+    "health": {
+      "avg": 1,
+      "p50": 0,
+      "p95": 1,
+      "p99": 26
+    },
+    "projects": {
+      "avg": 1,
+      "p50": 0,
+      "p95": 1,
+      "p99": 1
+    },
+    "notifications": {
+      "avg": 1,
+      "p50": 1,
+      "p95": 1,
+      "p99": 1
+    }
+  },
+  "importProjectMs": {
+    "elapsed": 10,
+    "services": 2
+  },
+  "envDetectMs": {
+    "elapsed": 586,
+    "tools": 15
+  },
+  "coldStartMs": {
+    "elapsed": 1034,
+    "target": "≤5000（测试方案建议值）",
+    "note": "从 spawn node 到首个 health 200，含 Nest 路由映射与 V5 迁移检查"
+  },
+  "daemonRestored": true
+}

@@ -151,3 +151,6 @@ export function createPlatformAdapter(platform: NodeJS.Platform = process.platfo
 
 /** 后端单例：进程平台固定，导出共享实例避免重复构造 */
 export const platform = createPlatformAdapter();
+
+export { credentials, createCredentialStore } from './credential-store';
+export type { CredentialStore } from './credential-store';

@@ -157,7 +157,7 @@ export class AgentService implements OnModuleInit {
       | { id: string; project_scope: string | null; input_summary: string; status: string }
       | undefined;
     if (!task) throw new Error('task not found');
-    if (!this.model.hasKey()) {
+    if (!this.model.hasKey() && !(await this.model.loadKeyFromStore())) {
       this.ds.db.prepare(`UPDATE tasks SET status='Failed', finished_at=? WHERE id=?`).run(new Date().toISOString(), taskId);
       throw new Error('model api key not configured');
     }
