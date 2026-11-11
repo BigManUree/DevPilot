@@ -168,6 +168,9 @@ importers:
 
   apps/backend:
     dependencies:
+      '@devpilot/platform-adapters':
+        specifier: workspace:*
+        version: link:../../packages/platform-adapters
       '@devpilot/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
@@ -281,6 +284,15 @@ importers:
       vite:
         specifier: ^5.4.0
         version: 5.4.21(@types/node@22.20.5)(terser@5.51.2)
+
+  packages/platform-adapters:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.5
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
 
   packages/shared-types:
     devDependencies:

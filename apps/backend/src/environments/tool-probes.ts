@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { platform as plat } from '@devpilot/platform-adapters';
 
 /** 环境检测探针定义（PRD 3.11）：PATH 上找可执行文件 → 版本命令 → 正则提取 */
 export interface ToolProbe {
@@ -43,9 +44,10 @@ export interface ToolProbeResult {
 /** 探测单个工具：missing / ok / error。Windows 下 npm 等是 .cmd 包装：先原命令，ENOENT 再试 .cmd */
 export async function probeTool(p: ToolProbe): Promise<ToolProbeResult> {
   const attempts: Array<{ command: string; shell: boolean }> = [{ command: p.command, shell: false }];
-  if (process.platform === 'win32' && !/\.(exe|cmd|bat)$/i.test(p.command)) {
+  const resolved = plat.resolveCommand(p.command);
+  if (resolved !== p.command) {
     // Node ≥18.20 禁止 shell:false 直接 spawn .cmd（EINVAL），需 shell:true
-    attempts.push({ command: `${p.command}.cmd`, shell: true });
+    attempts.push({ command: resolved, shell: true });
   }
   let lastCode = '';
   for (const a of attempts) {

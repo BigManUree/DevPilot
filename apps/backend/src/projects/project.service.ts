@@ -6,6 +6,7 @@ import { DatabaseService } from '../database/database.module';
 import { AuditService } from '../permissions/audit.service';
 import { ProjectAnalyzer, type AnalysisResult } from './project-analyzer';
 import type { ProjectImportSource } from '@devpilot/shared-types';
+import { platform as plat } from '@devpilot/platform-adapters';
 
 /**
  * 项目管理（PRD 3.2 + WF-02）：
@@ -238,16 +239,8 @@ export class ProjectService {
     const dataDir = process.env.DEVIPILOT_DATA_DIR ?? path.join(process.env.APPDATA ?? process.cwd(), 'devpilot', 'data');
     const dest = path.join(dataDir, 'archives', `${path.basename(archivePath)}.${Date.now()}`);
     fs.mkdirSync(dest, { recursive: true });
-    if (path.extname(archivePath).toLowerCase() === '.zip') {
-      // Windows: PowerShell Expand-Archive
-      const { execSync } = require('node:child_process') as typeof import('node:child_process');
-      execSync(
-        `powershell -NoProfile -Command Expand-Archive -LiteralPath ${JSON.stringify(archivePath)} -DestinationPath ${JSON.stringify(dest)} -Force`,
-        { stdio: 'pipe' },
-      );
-    } else {
-      throw new Error(`unsupported archive type: ${archivePath}（首版支持 .zip）`);
-    }
+    // 解压实现收敛到 platform-adapters（win32 Expand-Archive / posix unzip）
+    plat.extractArchive(archivePath, dest);
     return dest;
   }
 }

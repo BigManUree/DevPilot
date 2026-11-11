@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AuditService } from '../permissions/audit.service';
 import { LogService } from '../logs/log.service';
+import { platform as plat } from '@devpilot/platform-adapters';
 
 const run = promisify(execFile);
 const shellExec = promisify(exec);
@@ -41,7 +42,7 @@ export class ExternalToolsService {
     // PATH 探测
     const whereCmd = async (cmd: string): Promise<string | null> => {
       try {
-        const { stdout } = await shellExec(`where ${cmd}`, { timeout: 8_000, windowsHide: true });
+        const { stdout } = await shellExec(`${plat.whichProgram()} ${cmd}`, { timeout: 8_000, windowsHide: true });
         const first = stdout.split('\n').map((l) => l.trim()).filter(Boolean)[0];
         return first ?? null;
       } catch { return null; }

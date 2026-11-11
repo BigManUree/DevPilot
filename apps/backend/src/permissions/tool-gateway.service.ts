@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { PermissionService } from './permission.service';
 import { AuditService } from './audit.service';
 import { DatabaseService } from '../database/database.module';
+import { platform as plat } from '@devpilot/platform-adapters';
 import { EXECUTION_LIMITS_DEFAULT } from '@devpilot/shared-types';
 
 /**
@@ -165,8 +166,7 @@ export class ToolGatewayService {
     const timeoutMs = Number(req.params.timeoutMs ?? EXECUTION_LIMITS_DEFAULT.commandTimeoutMs);
 
     return new Promise((resolve, reject) => {
-      const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
-      const shellArg = process.platform === 'win32' ? ['/c', command] : ['-c', command];
+      const { shell, args: shellArg } = plat.shellFor(command);
       const child = spawn(shell, shellArg, { cwd, windowsHide: true });
       let stdout = '';
       let stderr = '';
@@ -175,8 +175,7 @@ export class ToolGatewayService {
       const timer = setTimeout(() => {
         timedOut = true;
         // 超时强制终止：只终止本调用创建的进程
-        if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
-        else child.kill('SIGKILL');
+        if (child.pid) plat.killTree(child.pid);
       }, timeoutMs);
 
       child.stdout?.on('data', (d) => (stdout += String(d)));

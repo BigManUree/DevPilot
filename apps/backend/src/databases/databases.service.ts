@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseService } from '../database/database.module';
 import { AuditService } from '../permissions/audit.service';
 import { LogService } from '../logs/log.service';
+import { platform as plat } from '@devpilot/platform-adapters';
 
 const exec = promisify(execFile);
 
@@ -211,10 +212,8 @@ export class DatabasesService {
     const t = this.tracked.get(id);
     if (!t) return { ok: false, error: 'not managed in this session' };
     try {
-      if (process.platform === 'win32' && t.child.pid) {
-        await exec('taskkill', ['/T', '/F', '/PID', String(t.child.pid)], { timeout: 10_000, windowsHide: true });
-      } else {
-        t.child.kill();
+      if (t.child.pid) {
+        await plat.killTreeWait(t.child.pid);
       }
     } catch { /* 已退出 */ }
     this.tracked.delete(id);

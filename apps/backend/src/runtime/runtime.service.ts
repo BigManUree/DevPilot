@@ -7,6 +7,7 @@ import { AuditService } from '../permissions/audit.service';
 import { EventsGateway } from '../events.gateway';
 import { LogService } from '../logs/log.service';
 import type { ServiceStatus } from '@devpilot/shared-types';
+import { platform as plat } from '@devpilot/platform-adapters';
 
 interface TrackedProcess {
   serviceId: string;
@@ -109,8 +110,7 @@ export class RuntimeService implements OnApplicationShutdown {
 
     this.setStatus(serviceId, 'Starting');
     const sid = sessionId ?? randomUUID();
-    const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
-    const args = process.platform === 'win32' ? ['/c', svc.start_command] : ['-c', svc.start_command];
+    const { shell, args } = plat.shellFor(svc.start_command);
     const env = svc.env_json ? { ...process.env, ...(JSON.parse(svc.env_json) as Record<string, string>) } : process.env;
     const child = spawn(shell, args, { cwd: svc.workdir, env, windowsHide: true });
 
@@ -176,8 +176,8 @@ export class RuntimeService implements OnApplicationShutdown {
     const full = this.ds.db.prepare('SELECT stop_command FROM project_services WHERE id = ?').get(serviceId) as { stop_command: string | null };
     let graceful = false;
     if (full?.stop_command) {
-      spawn(process.platform === 'win32' ? 'cmd.exe' : '/bin/sh',
-        process.platform === 'win32' ? ['/c', full.stop_command] : ['-c', full.stop_command],
+      const stop = plat.shellFor(full.stop_command);
+      spawn(stop.shell, stop.args,
         { cwd: this.getServiceWorkdir(serviceId), windowsHide: true });
       const deadline = Date.now() + 5000;
       while (Date.now() < deadline) {
@@ -208,15 +208,7 @@ export class RuntimeService implements OnApplicationShutdown {
 
   private pidAlive(pid?: number): boolean {
     if (!pid) return false;
-    try {
-      if (process.platform === 'win32') {
-        const { execSync } = require('node:child_process') as typeof import('node:child_process');
-        const out = execSync(`tasklist /FI "PID eq ${pid}" /NH`, { windowsHide: true }).toString();
-        return out.includes(String(pid));
-      }
-      process.kill(pid, 0);
-      return true;
-    } catch { return false; }
+    return plat.pidAlive(pid);
   }
 
   /** 停止整个项目：仅处理本项目会话创建的进程；共享服务按引用保护跳过 */
@@ -257,18 +249,10 @@ export class RuntimeService implements OnApplicationShutdown {
     });
   }
 
-  /** 平台进程树终止：按 PID，不按名称 */
+  /** 平台进程树终止：按 PID，不按名称（实现收敛到 platform-adapters） */
   private killProcessTree(pid?: number) {
     if (!pid) return;
-    if (process.platform === 'win32') {
-      spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true });
-    } else {
-      try {
-        process.kill(-pid, 'SIGKILL');
-      } catch {
-        try { process.kill(pid, 'SIGKILL'); } catch { /* 已退出 */ }
-      }
-    }
+    plat.killTree(pid);
   }
 
   private getStatus(serviceId: string): ServiceStatus {
