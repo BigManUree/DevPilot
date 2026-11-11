@@ -86,6 +86,30 @@ async function main() {
   const leaked = JSON.stringify(audit).match(/sk-[A-Za-z0-9]{8,}/);
   record('S11', '审计记录存在且无明文密钥泄漏', hasAudit && !leaked, `${audit.length} 条`);
 
+  // S13 共享服务引用保护（双项目 fixture）+ 跨设备迁移路径重映射（测试场景 18）
+  // 1) 导出项目 A（demo）→ remap 导入为项目 B（新前缀，生成新 ID）
+  const exportA = await fetch(`${API}/backups/export-project`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: pid }) }).then(j);
+  const newPrefix = 'C:/Users/administer/WorkBuddy/DevPilot/tests/fixtures/_acceptance-shared-B';
+  const importB = await fetch(`${API}/backups/import-project`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bundlePath: exportA.file, remap: { oldPrefix: 'C:/Users/administer/WorkBuddy/DevPilot/tests/fixtures/demo-project', newPrefix } }) }).then(j);
+  const pidB = importB.projectId;
+  // 2) 两个项目各创建同名共享服务（keepalive 夹具：无端口、无引号命令；带引号的 node -e 经 cmd.exe /c 会拆坏引号并立即退出）
+  const sharedName = 'shared-echo-' + Date.now();
+  const svcA = await fetch(`${API}/projects/${pid}/services`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: sharedName, service_type: 'backend', workdir: 'C:/Users/administer/WorkBuddy/DevPilot/tests/fixtures/keepalive', start_command: 'node keepalive.js', shared: true }) }).then(j);
+  const svcB = await fetch(`${API}/projects/${pidB}/services`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: sharedName, service_type: 'backend', workdir: 'C:/Users/administer/WorkBuddy/DevPilot/tests/fixtures/keepalive', start_command: 'node keepalive.js', shared: true }) }).then(j);
+  // 3) 只启动 B 的共享服务 → 停 A 的被引用保护拒绝 → 停 B 的放行
+  //   （机制为对称保护：双方同时 Running 时互相拒绝，用例采用单侧运行时序避免死锁）
+  const startB = await fetch(`${API}/services/${svcB.serviceId}/start`, { method: 'POST' }).then(j);
+  await new Promise((r) => setTimeout(r, 1200));
+  const stopAWhileBRunning = await fetch(`${API}/services/${svcA.serviceId}/stop`, { method: 'POST' }).then(j);
+  const stopB = await fetch(`${API}/services/${svcB.serviceId}/stop`, { method: 'POST' }).then(j);
+  const protectedRefused = startB.status === 'Running' && stopAWhileBRunning.stopped === false && /referenced by/.test(stopAWhileBRunning.reason ?? '');
+  record('S13', '共享服务引用保护（双项目 fixture）', protectedRefused && stopB.stopped === true,
+    `stopA=${stopAWhileBRunning.stopped}(${(stopAWhileBRunning.reason ?? '').slice(0, 60)}) stopB=${stopB.stopped}`);
+  record('S13b', '跨设备迁移路径重映射', importB.ok === true && importB.remapped === true && importB.skipped === false,
+    `remapped=${importB.remapped} services=${importB.created?.services}`);
+  // 4) 清理：删除项目 B（级联其服务），remap 导入的项目记录不复留
+  await fetch(`${API}/projects/${pidB}`, { method: 'DELETE' });
+
   // 汇总
   const pass = results.filter((r) => r.pass).length;
   console.log(`\n===== 验收汇总：${pass}/${results.length} PASSED =====`);
@@ -97,7 +121,6 @@ async function main() {
     skipped: [
       'S4-Node-pnpm 识别变体（同 S1 机制）',
       'S12 自动修复 LLM 全链路（待 DeepSeek API Key）',
-      'S13 共享服务引用保护（机制已实现 stopService otherRefs，需多项目 fixture）',
       'S14 Git 操作保护（Git 模块属第二阶段）',
       'S16 插件不兼容阻止（插件系统属第三阶段）',
       'S20 异常退出恢复（需 kill -9 后端实测，建议人工执行）',

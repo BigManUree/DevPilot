@@ -95,8 +95,10 @@ export class BackupService {
     return { file, counts: { services: services.length, profiles: profiles.length } };
   }
 
-  /** 项目导入：按 root_path 幂等（已存在则跳过项目行，仅恢复缺失的 services/profiles） */
-  importProject(bundlePath: string): { ok: boolean; projectId?: string; skipped?: boolean; created: { services: number; profiles: number }; error?: string } {
+  /** 项目导入：按 root_path 幂等（已存在则跳过项目行，仅恢复缺失的 services/profiles）。
+   *  跨设备迁移（测试场景 18）：remap = { oldPrefix, newPrefix } 时对 root_path 与 workdir 做前缀重映射，
+   *  使导出机器上的绝对路径在本机生效。 */
+  importProject(bundlePath: string, remap?: { oldPrefix: string; newPrefix: string }): { ok: boolean; projectId?: string; skipped?: boolean; remapped?: boolean; created: { services: number; profiles: number }; error?: string } {
     const raw = fs.readFileSync(bundlePath, 'utf-8');
     const bundle = JSON.parse(raw) as {
       format: string;
@@ -105,9 +107,24 @@ export class BackupService {
       profiles: Array<{ id: string; name: string; variables_json: string; active: number }>;
     };
     if (bundle.format !== 'devpilot-project-bundle/v1') return { ok: false, created: { services: 0, profiles: 0 }, error: '不支持的导出格式' };
+
+    const remapPath = (p?: string | null): string | null => {
+      if (!p) return null;
+      if (remap?.oldPrefix) {
+        const norm = p.replace(/\//g, '\\');
+        const oldNorm = remap.oldPrefix.replace(/\//g, '\\');
+        if (norm.toLowerCase().startsWith(oldNorm.toLowerCase())) {
+          return remap.newPrefix + p.slice(remap.oldPrefix.length);
+        }
+      }
+      return p;
+    };
+    const rootPath = remapPath(bundle.project.root_path) ?? bundle.project.root_path;
+    const remapped = rootPath !== bundle.project.root_path;
     const now = new Date().toISOString();
-    const existing = this.ds.db.prepare('SELECT id FROM projects WHERE root_path = ?').get(bundle.project.root_path) as { id: string } | undefined;
-    const pid = existing?.id ?? bundle.project.id;
+    const existing = this.ds.db.prepare('SELECT id FROM projects WHERE root_path = ?').get(rootPath) as { id: string } | undefined;
+    // 幂等键是 root_path：路径被重映射（跨设备迁移）时原 ID 必然冲突，生成新 ID 作为一个新项目导入
+    const pid = existing?.id ?? (remapped ? randomUUID() : bundle.project.id);
     let createdServices = 0;
     let createdProfiles = 0;
     const tx = this.ds.db.transaction(() => {
@@ -115,29 +132,31 @@ export class BackupService {
         this.ds.db.prepare(
           `INSERT INTO projects (id, name, root_path, project_type, language, framework, import_source, analysis_status, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, 'bundle-import', 'confirmed', ?, ?)`,
-        ).run(pid, bundle.project.name, bundle.project.root_path, bundle.project.project_type ?? null, bundle.project.language ?? null, bundle.project.framework ?? null, now, now);
+        ).run(pid, bundle.project.name, rootPath, bundle.project.project_type ?? null, bundle.project.language ?? null, bundle.project.framework ?? null, now, now);
       }
       for (const s of bundle.services) {
-        const dupe = this.ds.db.prepare('SELECT id FROM project_services WHERE id = ?').get(s.id);
+        const sid = remapped ? randomUUID() : s.id;
+        const dupe = this.ds.db.prepare('SELECT id FROM project_services WHERE id = ?').get(sid);
         if (dupe) continue;
         this.ds.db.prepare(
           `INSERT INTO project_services (id, project_id, name, service_type, workdir, start_command, stop_command, restart_command, build_command, port, env_json, health_check_json, depends_on_json, shared, status, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Stopped', ?, ?)`,
-        ).run(s.id, pid, s.name, s.service_type, s.workdir, s.start_command, s.stop_command, s.restart_command, s.build_command, s.port, s.env_json, s.health_check_json, s.depends_on_json, s.shared ?? 0, s.created_at ?? now, s.updated_at ?? now);
+        ).run(sid, pid, s.name, s.service_type, remapPath(s.workdir), s.start_command, s.stop_command, s.restart_command, s.build_command, s.port, s.env_json, s.health_check_json, s.depends_on_json, s.shared ?? 0, s.created_at ?? now, s.updated_at ?? now);
         createdServices++;
       }
       for (const p of bundle.profiles ?? []) {
+        const profileId = remapped ? randomUUID() : p.id;
         const dupe = this.ds.db.prepare('SELECT id FROM env_profiles WHERE project_id = ? AND name = ?').get(pid, p.name);
         if (dupe) continue;
         this.ds.db.prepare(
           `INSERT INTO env_profiles (id, project_id, name, variables_json, active, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        ).run(p.id, pid, p.name, p.variables_json, p.active, now, now);
+        ).run(profileId, pid, p.name, p.variables_json, p.active, now, now);
         createdProfiles++;
       }
     });
     tx();
     this.audit.record({ subject: 'user:local-user', action: 'backup.import-project', target: bundlePath, result: 'ok', detail: { projectId: pid } });
-    return { ok: true, projectId: pid, skipped: !!existing, created: { services: createdServices, profiles: createdProfiles } };
+    return { ok: true, projectId: pid, skipped: !!existing, remapped, created: { services: createdServices, profiles: createdProfiles } };
   }
 }

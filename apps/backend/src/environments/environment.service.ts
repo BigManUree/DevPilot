@@ -80,14 +80,19 @@ export class EnvironmentService {
       portChecks.push({ service: s.name, port: s.port, occupied: await this.portOccupied(s.port) });
     }
 
-    const missing = report.filter((r) => r.status !== 'ok');
+    // 需求 7.3：missing（未安装，含安装入口）与 error（探测异常，需人工排查）分开报告
+    const missing = report.filter((r) => r.status === 'missing');
+    const errors = report.filter((r) => r.status === 'error');
+    const problems = [...missing, ...errors];
     return {
       projectId,
       requirements: report,
       missing,
+      errors,
+      problems,
       depsInstalled,
       portChecks,
-      overall: missing.length === 0 && !portChecks.some((p) => p.occupied) ? 'ready' : 'action-needed',
+      overall: problems.length === 0 && !portChecks.some((p) => p.occupied) ? 'ready' : 'action-needed',
     };
   }
 

@@ -23,5 +23,7 @@ export class BackupController {
   exportProject(@Body() body: { projectId: string }) { return this.svc.exportProject(body.projectId); }
 
   @Post('import-project')
-  importProject(@Body() body: { bundlePath: string }) { return this.svc.importProject(body.bundlePath); }
+  importProject(@Body() body: { bundlePath: string; remap?: { oldPrefix: string; newPrefix: string } }) {
+    return this.svc.importProject(body.bundlePath, body.remap);
+  }
 }

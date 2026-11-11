@@ -1188,6 +1188,106 @@ function FirstRunWizard({ onFinish }: { onFinish: () => void }) {
   );
 }
 
+/* ---------- Agent 管理中心（二阶段 #1） ---------- */
+function AgentsCenterPage() {
+  const [agents, setAgents] = useState<any[]>([]);
+  const [activeTasks, setActiveTasks] = useState<any[]>([]);
+  const load = React.useCallback(async () => {
+    setAgents(await api('/agents'));
+    const tasks = await api<any[]>('/tasks');
+    setActiveTasks(tasks.filter((t) => !['Completed', 'Failed', 'Cancelled'].includes(t.status)));
+  }, []);
+  useEffect(() => { void load(); const t = setInterval(load, 4000); return () => clearInterval(t); }, [load]);
+
+  return (
+    <Space direction="vertical" style={{ width: '100%' }}>
+      <Card size="small" title="注册 Agent">
+        <Table rowKey="id" size="small" pagination={false} dataSource={agents}
+          columns={[
+            { title: 'ID', dataIndex: 'id' },
+            { title: '名称', dataIndex: 'name' },
+            { title: '类型', dataIndex: 'type', render: (t) => <Tag color="blue">{t}</Tag> },
+            { title: '来源', dataIndex: 'origin', render: (o) => <Tag color={o === 'builtin' ? 'default' : 'green'}>{o === 'builtin' ? '内置' : o}</Tag> },
+            { title: '版本', dataIndex: 'version' },
+            { title: '能力', dataIndex: 'capabilities_json', render: (s) => {
+              try { return (JSON.parse(s) as string[]).map((c) => <Tag key={c}>{c}</Tag>); } catch { return s; }
+            } },
+            { title: '状态', dataIndex: 'status', render: (s) => <Tag color={s === 'registered' ? 'green' : 'default'}>{s}</Tag> },
+          ]} />
+      </Card>
+      <Card size="small" title={`协作过程（进行中任务 ${activeTasks.length}）`}>
+        <Table rowKey="id" size="small" pagination={false} dataSource={activeTasks}
+          locale={{ emptyText: '当前无进行中的任务' }}
+          columns={[
+            { title: '目标', dataIndex: 'input_summary', ellipsis: true },
+            { title: '状态', dataIndex: 'status', render: (s) => <Tag color={statusColor[s] ?? 'default'}>{s}</Tag> },
+            { title: '最近事件', dataIndex: 'result_summary', ellipsis: true },
+            { title: '开始时间', dataIndex: 'started_at' },
+          ]} />
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
+          Supervisor 规划并顺序派发子任务（project-analyzer → diagnostic → repair → validation），子任务经权限网关执行；审批/暂停/追问事件实时推送。
+        </Typography.Paragraph>
+      </Card>
+    </Space>
+  );
+}
+
+/* ---------- 记忆系统（二阶段 #2） ---------- */
+function MemoryPage() {
+  const [rows, setRows] = useState<any[]>([]);
+  const [scope, setScope] = useState<string | undefined>();
+  const [kw, setKw] = useState('');
+  const [newContent, setNewContent] = useState('');
+  const load = React.useCallback(async () => {
+    if (kw.trim()) {
+      const q = scope ? `q=${encodeURIComponent(kw)}&scope=${scope}` : `q=${encodeURIComponent(kw)}`;
+      setRows((await api<{ rows: any[] }>(`/memories/search?${q}`)).rows);
+    } else {
+      setRows(await api(scope ? `/memories?scope=${scope}` : '/memories'));
+    }
+  }, [scope, kw]);
+  useEffect(() => { void load(); }, [load]);
+
+  const create = async () => {
+    if (!newContent.trim()) return;
+    await api('/memories', 'POST', { scope: scope ?? 'global', content: newContent, source: 'manual' });
+    setNewContent('');
+    message.success('记忆已保存');
+    void load();
+  };
+  const remove = async (id: string) => {
+    await api(`/memories/${id}/delete`, 'POST');
+    void load();
+  };
+
+  return (
+    <Space direction="vertical" style={{ width: '100%' }}>
+      <Space wrap>
+        <Select allowClear placeholder="全部 scope" style={{ width: 140 }} value={scope}
+          onChange={(v) => setScope(v)}
+          options={['global', 'project', 'task'].map((v) => ({ value: v, label: v }))} />
+        <Input.Search placeholder="关键词检索（空格分词 AND 匹配）" style={{ width: 320 }} value={kw}
+          onChange={(e) => setKw(e.target.value)} onSearch={() => void load()} allowClear />
+        <Button onClick={() => { setKw(''); setScope(undefined); }}>重置</Button>
+      </Space>
+      <Space.Compact style={{ width: '100%' }}>
+        <Input placeholder="手动沉淀一条记忆（global scope）" value={newContent} onChange={(e) => setNewContent(e.target.value)} onPressEnter={create} />
+        <Button type="primary" onClick={create}>保存</Button>
+      </Space.Compact>
+      <Table rowKey="id" size="small" dataSource={rows}
+        columns={[
+          { title: 'Scope', dataIndex: 'scope', width: 80, render: (s) => <Tag color={s === 'global' ? 'purple' : s === 'project' ? 'blue' : 'green'}>{s}</Tag> },
+          { title: '内容', dataIndex: 'content_ref', ellipsis: true },
+          { title: '来源', dataIndex: 'source', width: 100 },
+          { title: '置信度', dataIndex: 'confidence', width: 80, render: (v) => Number(v).toFixed(2) },
+          { title: '关联', width: 160, render: (_, r) => r.project_id ? `项目 ${String(r.project_id).slice(0, 8)}` : r.task_id ? `任务 ${String(r.task_id).slice(0, 8)}` : '-' },
+          { title: '创建时间', dataIndex: 'created_at', width: 180 },
+          { title: '操作', width: 70, render: (_, r) => <Button size="small" danger onClick={() => remove(r.id)}>删除</Button> },
+        ]} />
+    </Space>
+  );
+}
+
 /* ---------- 主布局 ---------- */
 const NAV = [
   { key: '1', label: '首页工作台' },
@@ -1206,6 +1306,8 @@ const NAV = [
   { key: '14', label: '配置中心' },
   { key: '15', label: '备份迁移' },
   { key: '16', label: '通知中心' },
+  { key: '17', label: 'Agent 中心' },
+  { key: '18', label: '记忆系统' },
 ];
 
 export default function App() {
@@ -1236,6 +1338,8 @@ export default function App() {
       case '14': return <ConfigCenterPage />;
       case '15': return <BackupCenterPage />;
       case '16': return <NotificationCenterPage />;
+      case '17': return <AgentsCenterPage />;
+      case '18': return <MemoryPage />;
       default: return null;
     }
   };
