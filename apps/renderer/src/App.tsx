@@ -1487,6 +1487,103 @@ function PluginsCenterPage() {
   );
 }
 
+/* ---------- 工作流 ---------- */
+function WorkflowsPage() {
+  const [rows, setRows] = useState<any[]>([]);
+  const [detail, setDetail] = useState<any>(null);
+  const [runs, setRuns] = useState<any[]>([]);
+  const [runDetail, setRunDetail] = useState<any>(null);
+  const [newName, setNewName] = useState('');
+  const [newJson, setNewJson] = useState('');
+
+  const load = React.useCallback(async () => setRows(await api('/workflows')), []);
+  useEffect(() => { void load(); }, [load]);
+
+  const create = async () => {
+    if (!newName.trim() || !newJson.trim()) { message.warning('名称与定义 JSON 均必填'); return; }
+    let definition: any;
+    try { definition = JSON.parse(newJson); } catch { message.error('定义不是合法 JSON'); return; }
+    const r = await api<{ id?: string; message?: string }>('/workflows', 'POST', { name: newName.trim(), definition });
+    if (r.id) { message.success('工作流已创建'); setNewName(''); setNewJson(''); void load(); }
+    else message.error(r.message ?? '创建失败');
+  };
+
+  const run = async (w: any) => {
+    message.loading({ content: `运行 ${w.name} 中…`, key: w.id, duration: 0 });
+    const r = await api<{ runId: string; status: string; context: any }>(`/workflows/${w.id}/run`, 'POST');
+    message.destroy(w.id);
+    r.status === 'Completed' ? message.success(`运行完成（runId ${r.runId.slice(0, 8)}）`) : message.error(`运行 ${r.status}：${(r.context?.__error ?? '').slice(0, 80)}`);
+    void load();
+  };
+
+  const showRuns = async (w: any) => {
+    setRuns(await api(`/workflows/${w.id}/runs`));
+    setDetail(w);
+  };
+
+  return (
+    <Space direction="vertical" style={{ width: '100%' }}>
+      <Card size="small" title="新建工作流（JSON 定义）"
+        extra={<Button size="small" type="primary" onClick={create}>创建</Button>}>
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Input placeholder="工作流名称（唯一）" value={newName} onChange={(e) => setNewName(e.target.value)} />
+          <Input.TextArea rows={6} placeholder={'步骤定义 JSON，例：\n{\n  "steps": [\n    { "id": "ver", "type": "command", "command": "node --version" },\n    { "id": "check", "type": "condition", "left": "${ver.exitCode}", "op": "eq", "right": "0", "gotoOnTrue": "good", "gotoOnFalse": "bad" },\n    { "id": "good", "type": "notify", "title": "健康 ${ver.output}" },\n    { "id": "finish", "type": "condition", "left": "1", "op": "eq", "right": "1", "gotoOnTrue": "end" },\n    { "id": "bad", "type": "notify", "title": "异常分支" }\n  ]\n}\n步骤类型：task（goal）/ command（command,cwd）/ notify（title,content）/ condition（left,op,right,gotoOnTrue,gotoOnFalse，"end" 终止）'} value={newJson} onChange={(e) => setNewJson(e.target.value)} />
+        </Space>
+      </Card>
+      <Card size="small" title="工作流列表">
+        <Table rowKey="id" size="small" pagination={false} dataSource={rows}
+          columns={[
+            { title: '名称', dataIndex: 'name' },
+            { title: '步骤数', dataIndex: 'steps', width: 80 },
+            { title: '状态', dataIndex: 'enabled', width: 80, render: (e: boolean) => e ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> },
+            { title: '更新时间', dataIndex: 'updated_at', ellipsis: true },
+            { title: '操作', width: 260, render: (_, w) => (
+              <Space>
+                <Button size="small" type="primary" disabled={!w.enabled} onClick={() => void run(w)}>运行</Button>
+                <Button size="small" onClick={async () => { const full = await api<any>(`/workflows/${w.id}`); setDetail({ ...w, definition: (full as any).definition }); }}>定义</Button>
+                <Button size="small" onClick={() => void showRuns(w)}>历史</Button>
+                <Button size="small" onClick={async () => { await api(`/workflows/${w.id}/${w.enabled ? 'disable' : 'enable'}`, 'POST'); void load(); }}>{w.enabled ? '停用' : '启用'}</Button>
+                <Button size="small" danger onClick={async () => { await api(`/workflows/${w.id}`, 'DELETE'); void load(); }}>删除</Button>
+              </Space>
+            ) },
+          ]} />
+      </Card>
+      <Modal open={!!detail} onCancel={() => { setDetail(null); setRuns([]); }} footer={null} title={`工作流：${detail?.name ?? ''}`} width={860}>
+        {detail && (
+          <Tabs items={[
+            { key: 'def', label: '步骤视图', children: (
+              <Space direction="vertical" style={{ width: '100%' }}>
+                {(detail.definition?.steps ?? []).map((s: any) => (
+                  <Card key={s.id} size="small" type="inner" title={`${s.id} · ${s.type}`}
+                    extra={s.gotoOnTrue ? <Tag color="purple">T→{s.gotoOnTrue}{s.gotoOnFalse ? ` / F→${s.gotoOnFalse}` : ''}</Tag> : null}>
+                    <pre style={{ margin: 0, maxHeight: 120, overflow: 'auto', fontSize: 12 }}>{JSON.stringify(s, null, 2)}</pre>
+                  </Card>
+                ))}
+                <Steps size="small" items={(detail.definition?.steps ?? []).map((s: any) => ({ title: s.id }))} />
+              </Space>
+            ) },
+            { key: 'json', label: '定义 JSON', children: <pre style={{ maxHeight: 420, overflow: 'auto' }}>{JSON.stringify(detail.definition, null, 2)}</pre> },
+            { key: 'runs', label: `运行历史（${runs.length}）`, children: (
+              <Table rowKey="id" size="small" pagination={false} dataSource={runs}
+                expandable={{ expandedRowRender: (r) => <pre style={{ margin: 0, fontSize: 12 }}>{JSON.stringify(r.context, null, 2)}</pre> }}
+                columns={[
+                  { title: '运行 ID', dataIndex: 'id', render: (v: string) => v.slice(0, 8), width: 100 },
+                  { title: '状态', dataIndex: 'status', render: (s: string) => <Tag color={s === 'Completed' ? 'green' : s === 'Running' ? 'blue' : 'red'}>{s}</Tag> },
+                  { title: '当前步骤', dataIndex: 'current_step' },
+                  { title: '开始时间', dataIndex: 'started_at', ellipsis: true },
+                  { title: '操作', width: 80, render: (_, r) => <Button size="small" onClick={async () => setRunDetail(await api(`/workflow-runs/${r.id}`))}>详情</Button> },
+                ]} />
+            ) },
+          ]} />
+        )}
+      </Modal>
+      <Modal open={!!runDetail} onCancel={() => setRunDetail(null)} footer={null} title={`运行详情 ${runDetail?.id?.slice(0, 8) ?? ''}`} width={720}>
+        {runDetail && <pre style={{ maxHeight: 420, overflow: 'auto' }}>{JSON.stringify(runDetail, null, 2)}</pre>}
+      </Modal>
+    </Space>
+  );
+}
+
 /* ---------- 主布局 ---------- */
 const NAV = [
   { key: '1', label: '首页工作台' },
@@ -1508,6 +1605,7 @@ const NAV = [
   { key: '17', label: 'Agent 中心' },
   { key: '18', label: '记忆系统' },
   { key: '19', label: '插件中心' },
+  { key: '20', label: '工作流' },
 ];
 
 export default function App() {
@@ -1541,6 +1639,7 @@ export default function App() {
       case '17': return <AgentsCenterPage />;
       case '18': return <MemoryPage />;
       case '19': return <PluginsCenterPage />;
+      case '20': return <WorkflowsPage />;
       default: return null;
     }
   };

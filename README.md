@@ -9,7 +9,7 @@
 - 数据库 schema v8（31 表，版本化迁移 + 迁移前自动备份）
 - 后端端口 37100（REST `/api/v1/*` + WebSocket `/ws` 事件推送）
 
-## 功能版图（19 页工作台）
+## 功能版图（20 页工作台）
 
 | 页面 | 内容 |
 |---|---|
@@ -32,6 +32,7 @@
 | Agent 中心 | 6 注册 Agent、协作过程 |
 | 记忆系统 | scope 过滤、检索、沉淀 |
 | 插件中心 | 声明式插件（Manifest 校验/依赖/兼容/启停） |
+| 工作流 | JSON DSL 定义、线性/条件跳转、运行历史与上下文 |
 
 ## 开放接口
 
@@ -41,7 +42,7 @@
 ## 结构
 
 - `apps/desktop` — Electron 主进程（BackendManager 拉起后端）与 Preload
-- `apps/renderer` — React + TypeScript + Ant Design（19 页）
+- `apps/renderer` — React + TypeScript + Ant Design（20 页）
 - `apps/backend` — NestJS 本地后端（31 表 SQLite）
 - `packages/shared-types` — DTO、事件与共享类型
 - `packages/platform-adapters` — OS 差异适配层（shell/进程树/凭据存储/工具发现/解压）
