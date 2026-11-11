@@ -388,6 +388,8 @@ AI 不应绕过执行引擎直接操作系统资源。
 
 ### 9.1 桌面端开发框架（8.1）
 
+> **决策已回填（2026-11-11）**：已选定 **方案 A Electron** 并实际落地：桌面壳 `apps/desktop`（Electron + BackendManager 拉起 Nest 后端）+ 渲染层 `apps/renderer`（Vite + React）。以下候选表保留作历史记录。
+
 目前已提出三个候选方案，但用户尚未确认最终选择。
 
 ---------------------------------------------------------------------------------------------------------------------------------
@@ -415,7 +417,15 @@ AI 不应绕过执行引擎直接操作系统资源。
     -   开发简单、容易维护、方便 AI 辅助编程。
     -   第三方库和插件生态。
 
-**注意：8.1 尚未得到用户确认，不能将 Electron 记录为最终技术决策。**
+**【决策更新 2026-11-11】8.1 已按 Electron 落地实施（见 9.1 回填）。同时以下配套选型已随实现确定：**
+
+-   工程形态：pnpm monorepo（apps/backend、apps/desktop、apps/renderer、packages/shared-types）
+-   后端：NestJS 10（REST + WebSocket /ws 事件推送）
+-   前端：Vite + React + TypeScript
+-   本地数据库：better-sqlite3（单文件 devpilot.db，WAL）
+-   进程管理：Node child_process + 会话 pid 表 + 停止时进程树清理
+-   Agent 架构：自研 Supervisor 状态机（LangGraph.js 评估仍未做，见未完成工作清单）
+-   密钥存储：暂为环境变量 + credentials.json(0600)（Windows 凭据管理器接入在 backlog）
 
 ------------------------------------------------------------------------
 

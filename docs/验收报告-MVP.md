@@ -27,14 +27,16 @@
 
 本次覆盖的门禁项全部 PASSED：未授权命令执行（S5）、误杀外部进程（S6）、备份回滚（S7）、密钥脱敏（S11）、未验证不报成功（Validation 状态机）。
 
-## 3. 未纳入本次自动化（backlog）
+## 3. 未纳入本次自动化（backlog，2026-11-11 刷新）
 
-- LLM 真实链路（Supervisor 规划执行 / AI 修复全流程）：**待 DeepSeek API Key**，代码与审批/权限/Diff/回滚链路已就绪并单独验证。
-- 共享服务引用保护多项目场景：机制已实现（stopService otherRefs 检查），需双项目 fixture。
-- Git 操作保护、插件治理、异常退出恢复（kill -9 后端实测）：属第二/三阶段或建议人工执行。
+- ~~LLM 真实链路（Supervisor 规划执行 / AI 修复全流程）~~：**已完成**（DeepSeek 真实链路接入并验证，见开发日志 P2 批次）。
+- ~~终端 pre+输入框形态~~：**已完成**（xterm.js 终端已上线）。
+- ~~config-center 同名 profile UNIQUE 冲突返回 500~~：**已完成**（2026-11-11 修复，409/404 语义化，7 项接口验证通过，含 local-services / project-services 同类项）。
+- 共享服务引用保护多项目场景：机制已实现（stopService otherRefs 检查），双项目 fixture 自动化用例仍缺。
+- Git 操作保护推送策略细化、插件治理、异常退出恢复（kill -9 后端实测）：属第二/三阶段或建议人工执行。
 
 ## 4. 已知限制
 
-- 环境检测对未安装工具显示 error（missing/error 细分待细化）。
-- 终端为 pre+输入框形态，xterm.js 美化待第二阶段。
+- 环境检测对未安装工具显示 error（missing/error 细分待细化，需求 7.3）。
 - runTask 无 Key 已改为 {status:'Failed'} 返回。
+- 后端常驻以 scripts/backend-daemon.cmd + WMI 派生方式运行（沙箱内 schtasks 不可用）。
