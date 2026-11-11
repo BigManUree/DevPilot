@@ -71,6 +71,48 @@ const TOOLS = [
   },
 ];
 
+const RESOURCES = [
+  {
+    uri: 'devpilot://projects',
+    name: '项目清单',
+    description: 'DevPilot 全部项目的 JSON 概览（名称/路径/类型/分析状态）',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'devpilot://notifications',
+    name: '最近通知',
+    description: 'DevPilot 通知中心最近条目',
+    mimeType: 'application/json',
+  },
+];
+
+const PROMPTS = [
+  {
+    name: 'devpilot-task-summary',
+    description: '基于最近任务生成一段工作摘要（供 LLM 总结用）',
+    arguments: [{ name: 'limit', description: '任务条数，默认 5', required: false }],
+  },
+];
+
+async function readResource(uri) {
+  if (uri === 'devpilot://projects') return await apiGet('/projects');
+  if (uri === 'devpilot://notifications') return await apiGet('/notifications');
+  throw new Error(`unknown resource: ${uri}`);
+}
+
+async function getPrompt(name, args) {
+  if (name !== 'devpilot-task-summary') throw new Error(`unknown prompt: ${name}`);
+  const limit = Number(args?.limit ?? 5);
+  const rows = await apiGet('/tasks');
+  const list = (Array.isArray(rows) ? rows : []).slice(0, limit);
+  const lines = list.map((t) => `- [${t.status}] ${(t.input_summary ?? '').slice(0, 80)} → ${(t.result_summary ?? '').slice(0, 100) || '（无结果）'}`);
+  return {
+    messages: [
+      { role: 'user', content: { type: 'text', text: `以下是 DevPilot 最近 ${lines.length} 个任务的状态：\n${lines.join('\n')}\n\n请用中文写一段简短的工作进展摘要（不超过 200 字）。` } },
+    ],
+  };
+}
+
 async function apiGet(path) {
   const r = await fetch(`${API}${path}`);
   if (!r.ok) throw new Error(`upstream ${r.status}`);
@@ -142,13 +184,23 @@ rl.on('line', async (line) => {
   const { id, method, params } = msg;
   try {
     if (method === 'initialize') {
-      respond(id, { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER_INFO });
+      respond(id, { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {}, resources: {}, prompts: {} }, serverInfo: SERVER_INFO });
     } else if (method === 'notifications/initialized') {
       /* 客户端确认，无响应 */
     } else if (method === 'ping') {
       respond(id, {});
     } else if (method === 'tools/list') {
       respond(id, { tools: TOOLS });
+    } else if (method === 'resources/list') {
+      respond(id, { resources: RESOURCES });
+    } else if (method === 'resources/read') {
+      const data = await readResource(params.uri);
+      respond(id, { contents: [{ uri: params.uri, mimeType: 'application/json', text: JSON.stringify(data, null, 2) }] });
+    } else if (method === 'prompts/list') {
+      respond(id, { prompts: PROMPTS });
+    } else if (method === 'prompts/get') {
+      const p = await getPrompt(params.name, params.arguments ?? {});
+      respond(id, p);
     } else if (method === 'tools/call') {
       const out = await callTool(params.name, params.arguments ?? {});
       respond(id, { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }] });

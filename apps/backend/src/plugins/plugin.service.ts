@@ -23,6 +23,10 @@ export interface PluginManifest {
   description?: string;
   kind: 'hook';
   permissions?: string[];
+  /** 依赖的其他插件（reload 时校验：目标已安装且版本满足范围，否则整个插件拒绝安装） */
+  dependencies?: Array<{ id: string; versionRange?: string }>;
+  /** 兼容性声明：宿主版本范围（semver range，对 backend version）与平台白名单 */
+  compat?: { appVersion?: string; platforms?: string[] };
   hooks: Array<{ event: string; action: 'log' | 'notify' | 'command'; params?: Record<string, unknown> }>;
 }
 
@@ -51,6 +55,39 @@ export class PluginService implements OnModuleInit {
     );
   }
 
+  private readonly APP_VERSION = '0.1.0';
+
+  /** 极简 semver range：^x.y.z / ~x.y.z / x.y.z / >=x.y.z；不满足返回 false */
+  private versionSatisfies(version: string, range?: string): boolean {
+    if (!range) return true;
+    const parse = (v: string) => v.replace(/^v/, '').split('.').map((n) => parseInt(n, 10));
+    const [rv, rm, rp] = parse(version);
+    const m = range.match(/^(\^|~|>=|)(\d+)\.(\d+)\.(\d+)$/);
+    if (!m) return false;
+    const [, op, mj, mn, pt] = m;
+    const [aj, an, ap] = [parseInt(mj, 10), parseInt(mn, 10), parseInt(pt, 10)];
+    if (op === '') return rv === aj && rm === an && rp === ap;
+    if (op === '>=') return rv > aj || (rv === aj && (rm > an || (rm === an && rp >= ap)));
+    if (op === '^') return rv === aj && (rm > an || (rm === an && rp >= ap));
+    if (op === '~') return rv === aj && rm === an && rp >= ap;
+    return false;
+  }
+
+  /** 依赖与兼容校验：deps 目标须已安装且版本满足；compat 平台与宿主版本匹配 */
+  private checkDepsCompat(manifest: PluginManifest, installedVersions: Map<string, string>): string | null {
+    for (const dep of manifest.dependencies ?? []) {
+      const have = installedVersions.get(dep.id);
+      if (!have) return `依赖的插件未安装：${dep.id}`;
+      if (!this.versionSatisfies(have, dep.versionRange)) return `依赖插件 ${dep.id} 版本 ${have} 不满足范围 ${dep.versionRange}`;
+    }
+    const compat = manifest.compat;
+    if (compat) {
+      if (compat.platforms && !compat.platforms.includes(process.platform)) return `平台不兼容：需 ${compat.platforms.join('/')}，当前 ${process.platform}`;
+      if (compat.appVersion && !this.versionSatisfies(this.APP_VERSION, compat.appVersion)) return `宿主版本不兼容：需 ${compat.appVersion}，当前 ${this.APP_VERSION}`;
+    }
+    return null;
+  }
+
   /** Manifest 校验：id/name/version/kind/hooks 必填；event/action 白名单（兼容与安全门） */
   validateManifest(m: unknown): { ok: true; manifest: PluginManifest } | { ok: false; error: string } {
     const t = m as PluginManifest;
@@ -74,6 +111,17 @@ export class PluginService implements OnModuleInit {
     const now = new Date().toISOString();
     const installed: string[] = [];
     const rejected: Array<{ dir: string; error: string }> = [];
+    // 已安装版本表（供依赖校验）：目录扫描以 manifest 为准
+    const installedVersions = new Map<string, string>();
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const mf0 = path.join(dir, entry.name, 'plugin.json');
+      if (!fs.existsSync(mf0)) continue;
+      try {
+        const m0 = JSON.parse(fs.readFileSync(mf0, 'utf-8')) as PluginManifest;
+        if (m0.id && m0.version) installedVersions.set(m0.id, m0.version);
+      } catch { /* 坏 JSON 由下方正式校验报告 */ }
+    }
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       const mf = path.join(dir, entry.name, 'plugin.json');
@@ -90,6 +138,11 @@ export class PluginService implements OnModuleInit {
         rejected.push({ dir: entry.name, error: v.error });
         continue;
       }
+      const depErr = this.checkDepsCompat(v.manifest, installedVersions);
+      if (depErr) {
+        rejected.push({ dir: entry.name, error: depErr });
+        continue;
+      }
       // 对齐 V2 骨架表：status=installed（不禁用既有启用态）、manifest_ref 指向 plugin.json
       this.ds.db.prepare(
         `INSERT INTO plugins (id, name, version, type, origin, manifest_ref, status, permissions_json, updated_at)
@@ -97,6 +150,12 @@ export class PluginService implements OnModuleInit {
          ON CONFLICT(id) DO UPDATE SET name=excluded.name, version=excluded.version,
            manifest_ref=excluded.manifest_ref, permissions_json=excluded.permissions_json, updated_at=excluded.updated_at`,
       ).run(v.manifest.id, v.manifest.name, v.manifest.version, mf, JSON.stringify(v.manifest.permissions ?? []), now);
+      // 依赖表同步：先清后插（第一批只记直接依赖与范围约束）
+      this.ds.db.prepare('DELETE FROM plugin_dependencies WHERE plugin_id = ?').run(v.manifest.id);
+      for (const dep of v.manifest.dependencies ?? []) {
+        this.ds.db.prepare('INSERT OR REPLACE INTO plugin_dependencies (plugin_id, depends_plugin_id, version_constraint) VALUES (?, ?, ?)')
+          .run(v.manifest.id, dep.id, dep.versionRange ?? null);
+      }
       installed.push(v.manifest.id);
     }
     this.audit.record({ subject: 'system:plugin-runtime', action: 'plugin.reload', target: dir, result: 'ok', detail: { installed, rejected } });

@@ -113,3 +113,43 @@ describe('PluginService dispatch', () => {
     await expect(svc.dispatch({ event_type: 'task.failed', payload: {} })).resolves.toBeUndefined();
   });
 });
+
+describe('PluginService 依赖与兼容校验', () => {
+  it('依赖未安装 → 拒绝；依赖版本不满足范围 → 拒绝', () => {
+    const { svc } = makeService();
+    const installed = new Map([['base', '1.0.0']]);
+    const m1 = { ...validManifest, id: 'dep-ok', dependencies: [{ id: 'base', versionRange: '^1.0.0' }] };
+    const m2 = { ...validManifest, id: 'dep-bad', dependencies: [{ id: 'base', versionRange: '^2.0.0' }] };
+    const m3 = { ...validManifest, id: 'dep-missing', dependencies: [{ id: 'no-such' }] };
+    expect((svc as any).checkDepsCompat(m1, installed)).toBeNull();
+    expect((svc as any).checkDepsCompat(m2, installed)).toContain('不满足范围');
+    expect((svc as any).checkDepsCompat(m3, installed)).toContain('未安装');
+  });
+
+  it('compat 平台与宿主版本校验', () => {
+    const { svc } = makeService();
+    const installed = new Map();
+    const okPlat = (svc as any).checkDepsCompat({ ...validManifest, compat: { platforms: ['win32', 'darwin'] } }, installed);
+    const badPlat = (svc as any).checkDepsCompat({ ...validManifest, compat: { platforms: ['darwin'] } }, installed);
+    const okVer = (svc as any).checkDepsCompat({ ...validManifest, compat: { appVersion: '>=0.0.1' } }, installed);
+    const badVer = (svc as any).checkDepsCompat({ ...validManifest, compat: { appVersion: '>=99.0.0' } }, installed);
+    expect(okPlat).toBeNull();
+    expect(badPlat).toContain('平台不兼容');
+    expect(okVer).toBeNull();
+    expect(badVer).toContain('宿主版本不兼容');
+  });
+
+  it('versionSatisfies：精确 / ^ / ~ / >= 语义', () => {
+    const { svc } = makeService();
+    const v = (svc as any).versionSatisfies.bind(svc);
+    expect(v('1.2.3', '1.2.3')).toBe(true);
+    expect(v('1.2.3', '1.2.4')).toBe(false);
+    expect(v('1.2.9', '^1.2.3')).toBe(true);
+    expect(v('2.0.0', '^1.2.3')).toBe(false);
+    expect(v('1.2.3', '~1.2.1')).toBe(true);
+    expect(v('1.3.0', '~1.2.1')).toBe(false);
+    expect(v('1.5.0', '>=1.2.3')).toBe(true);
+    expect(v('1.0.0', '>=1.2.3')).toBe(false);
+    expect(v('1.2.3', undefined)).toBe(true);
+  });
+});
