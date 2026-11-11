@@ -311,8 +311,25 @@ function Runtime() {
             {
               title: '操作', render: (_, s: any) => (
                 <Space>
-                  <Button size="small" onClick={async () => { await api(`/services/${s.id}/start`, 'POST'); message.info('已启动'); }}>启动</Button>
-                  <Button size="small" danger onClick={async () => { await api(`/services/${s.id}/stop`, 'POST'); message.info('已停止'); }}>停止</Button>
+                  <Button size="small" onClick={async () => { await api(`/services/${s.id}/start`, 'POST'); message.info('已启动'); void load(); }}>启动</Button>
+                  <Button size="small" danger onClick={async () => {
+                    const r = await api<{ stopped: boolean; reason?: string }>(`/services/${s.id}/stop`, 'POST');
+                    if (r.stopped) { message.info('已停止'); }
+                    else if (/referenced by/.test(r.reason ?? '')) {
+                      // 共享服务被其他项目引用：提供强制停止确认
+                      Modal.confirm({
+                        title: '共享服务被其他项目引用',
+                        content: `${r.reason}。强制停止将解除引用保护（记入审计），确定继续？`,
+                        okText: '强制停止',
+                        onOk: async () => {
+                          const r2 = await api<{ stopped: boolean }>(`/services/${s.id}/stop`, 'POST', { force: true });
+                          r2.stopped ? message.success('已强制停止（审计已记录）') : message.error('停止失败');
+                          void load();
+                        },
+                      });
+                    } else { message.warning(r.reason ?? '停止失败'); }
+                    void load();
+                  }}>停止</Button>
                 </Space>
               ),
             },
@@ -520,26 +537,54 @@ function Environments() {
 function Settings({ rerunOnboarding }: { rerunOnboarding: () => void }) {
   const [st, setSt] = useState<any>(null);
   const [key, setKey] = useState('');
-  useEffect(() => { void api('/models/status').then(setSt); }, []);
+  const [provider, setProvider] = useState<string>('deepseek');
+  const [model, setModel] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+
+  const load = React.useCallback(async () => setSt(await api('/models/status')), []);
+  useEffect(() => { void load(); }, [load]);
+
   const save = async () => {
     if (!key.trim()) return;
-    await api('/models/config', 'POST', { apiKey: key });
-    message.success('API Key 已保存');
+    await api('/models/config', 'POST', { provider, apiKey: key, model: model || undefined, baseUrl: baseUrl || undefined });
+    message.success(`API Key 已保存（${provider}）`);
     setKey('');
-    setSt(await api('/models/status'));
+    void load();
   };
+  const switchTo = async (p: string) => {
+    const r = await api<{ provider: string; keyConfigured: boolean }>('/models/switch', 'POST', { provider: p });
+    r.keyConfigured ? message.success(`已切换到 ${p}`) : message.warning(`已切换到 ${p}，但该供应商尚未配置 Key`);
+    void load();
+  };
+
+  const current = st?.providers?.find((p: any) => p.active);
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
-      <Card size="small" title="模型配置（DeepSeek）">
-        <Descriptions size="small" column={1}>
-          <Descriptions.Item label="供应商">{st?.provider}</Descriptions.Item>
-          <Descriptions.Item label="模型">{st?.model}</Descriptions.Item>
-          <Descriptions.Item label="Key 状态">{st?.keyConfigured ? '已配置' : '未配置'}</Descriptions.Item>
-        </Descriptions>
-        <Space.Compact style={{ width: '100%', marginTop: 8 }}>
-          <Input.Password placeholder="sk-..." value={key} onChange={(e) => setKey(e.target.value)} onPressEnter={save} />
-          <Button type="primary" onClick={save}>保存</Button>
-        </Space.Compact>
+      <Card size="small" title="模型供应商">
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
+          全部走 OpenAI 兼容协议。Key 存入 Windows 凭据管理器（降级为本地加密文件）。当前激活：<Tag color="blue">{current?.label ?? st?.provider}</Tag>
+          {current && <Typography.Text type="secondary">模型 {current.defaultModel}{current.keyConfigured ? '' : ' · 未配置 Key'}</Typography.Text>}
+        </Typography.Paragraph>
+        <Table rowKey="id" size="small" pagination={false} dataSource={st?.providers ?? []}
+          columns={[
+            { title: '供应商', dataIndex: 'label' },
+            { title: 'Base URL', dataIndex: 'baseUrl', ellipsis: true },
+            { title: '默认模型', dataIndex: 'defaultModel' },
+            { title: 'Key', dataIndex: 'keyConfigured', render: (v) => <Tag color={v ? 'green' : 'default'}>{v ? '已配置' : '未配置'}</Tag> },
+            { title: '操作', render: (_, p: any) => p.active
+              ? <Tag color="blue">使用中</Tag>
+              : <Button size="small" onClick={() => switchTo(p.id)}>切换</Button> },
+          ]} />
+        <div style={{ marginTop: 12 }}>
+          <Space wrap>
+            <Select style={{ width: 150 }} value={provider} onChange={setProvider}
+              options={(st?.providers ?? []).map((p: any) => ({ value: p.id, label: p.label }))} />
+            <Input.Password placeholder="API Key（sk-...）" style={{ width: 260 }} value={key} onChange={(e) => setKey(e.target.value)} />
+            <Input placeholder="覆盖默认模型（可选）" style={{ width: 200 }} value={model} onChange={(e) => setModel(e.target.value)} />
+            <Input placeholder="覆盖 Base URL（可选，custom 必填）" style={{ width: 280 }} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+            <Button type="primary" onClick={save}>保存 Key</Button>
+          </Space>
+        </div>
       </Card>
       <Card size="small" title="首次启动引导">
         <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>重跑初始化检查 → 模型配置 → 环境/工具检测 → 项目导入的五步引导。</Typography.Paragraph>
