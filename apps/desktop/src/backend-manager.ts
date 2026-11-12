@@ -55,6 +55,9 @@ export class BackendManager {
     const env: NodeJS.ProcessEnv = { ...process.env, DEVIPILOT_BACKEND_PORT: String(this.port) };
     if (isPackaged) env.ELECTRON_RUN_AS_NODE = '1';
     else delete env.ELECTRON_RUN_AS_NODE;
+    // 外部注入的 NODE_OPTIONS（如宿主 CLI 的 --require shim）在打包态会被 Electron 拒绝，
+    // 导致后端进程直接退出；后端不需要这些注入，统一剔除。
+    delete env.NODE_OPTIONS;
     this.proc = spawn(cmd, [entry], {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
