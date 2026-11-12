@@ -35,4 +35,10 @@ export class RuntimeController {
   sessions() {
     return this.svc.sessions();
   }
+
+  /** 当前跟踪的进程（含被接管的"外部实例"标记），运行中心用它区分启动来源 */
+  @Get('runtime/tracked')
+  tracked() {
+    return this.svc.trackedServices();
+  }
 }

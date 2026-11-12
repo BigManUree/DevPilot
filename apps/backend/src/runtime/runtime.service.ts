@@ -1,6 +1,7 @@
 import { Injectable, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
-import { spawn, ChildProcess } from 'node:child_process';
+import { spawn, execFile, ChildProcess } from 'node:child_process';
 import net from 'node:net';
+import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { DatabaseService } from '../database/database.module';
 import { AuditService } from '../permissions/audit.service';
@@ -13,7 +14,11 @@ import { platform as plat } from '@devpilot/platform-adapters';
 interface TrackedProcess {
   serviceId: string;
   sessionId: string;
-  child: ChildProcess;
+  /** 外驻实例（非 DevPilot 拉起）没有 child，只有 pid */
+  child: ChildProcess | null;
+  pid?: number;
+  /** true = 端口上已有实例，DevPilot 只接管不重启（如应用自带自动更新拉起的进程） */
+  adopted?: boolean;
   startedAt: number;
 }
 
@@ -37,8 +42,11 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
   ) {}
 
   onApplicationShutdown() {
-    // 后端退出清理：终止全部会话进程
-    for (const t of this.tracked.values()) this.killProcessTree(t.child.pid);
+    // 后端退出清理：只终止本进程拉起的子进程；外驻实例（adopted）不属我们，不杀
+    for (const t of this.tracked.values()) {
+      if (t.adopted) continue;
+      if (t.child?.pid) this.killProcessTree(t.child.pid);
+    }
   }
 
   /** 异常退出恢复（测试场景 20）：后端被 kill -9 后重启，tracked 会话已丢失，
@@ -121,13 +129,45 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
   }
 
   /** 启动单个服务 */
-  async startService(serviceId: string, sessionId?: string): Promise<{ status: ServiceStatus; pid?: number }> {
+  async startService(serviceId: string, sessionId?: string): Promise<{ status: ServiceStatus; pid?: number; adopted?: boolean }> {
     const svc = this.ds.db.prepare('SELECT * FROM project_services WHERE id = ?').get(serviceId) as
-      | { id: string; project_id: string; name: string; workdir: string; start_command: string | null; port: number | null; env_json: string | null }
+      | { id: string; project_id: string; name: string; workdir: string; start_command: string | null; port: number | null; env_json: string | null; health_check_json: string | null }
       | undefined;
     if (!svc) throw new Error('service not found');
     if (!svc.start_command) throw new Error(`service ${svc.name} has no start_command`);
-    if (this.tracked.has(serviceId)) return { status: 'Running', pid: this.tracked.get(serviceId)!.child.pid };
+    if (this.tracked.has(serviceId)) return { status: 'Running', pid: this.trackedPid(this.tracked.get(serviceId)!) };
+
+    // 端口预检：端口上已有实例在跑时，直接接管，不再重复拉起。
+    // 典型场景：应用自带自动更新（如 wb2api 的 update 流程）在 DevPilot 之外重启了 exe，
+    // 旧实现会再 spawn 一个 → bind 失败 → exit 1 → 误标 Failed，而服务其实正常。
+    if (svc.port) {
+      const occupied = await this.portListening(svc.port);
+      if (occupied) {
+        const pid = await this.findListenerPid(svc.port);
+        const httpOk = await this.httpProbe(svc.port, this.healthPath(svc));
+        if (httpOk) {
+          const sid = sessionId ?? randomUUID();
+          this.tracked.set(serviceId, { serviceId, sessionId: sid, child: null, pid, adopted: true, startedAt: Date.now() });
+          if (pid) this.appendSessionPids(sid, pid);
+          this.setStatus(serviceId, 'Running');
+          this.broadcastServiceEvent(serviceId, svc.project_id);
+          this.logs.log({
+            level: 'warn',
+            sourceModule: `service.${svc.name}`,
+            projectId: svc.project_id,
+            message: `端口 ${svc.port} 已有实例在运行（PID ${pid ?? '未知'}），已接管为外部实例，未重复启动。点「停止」会终止该 PID。`,
+          });
+          this.audit.record({ subject: 'user:local-user', action: 'service.adopt', target: svc.name, result: 'ok', detail: { pid, port: svc.port } });
+          return { status: 'Running', pid, adopted: true };
+        }
+        const who = pid ? `PID ${pid}` : '其它进程';
+        const detail = pid ? await this.describeProcess(pid) : '';
+        throw new Error(
+          `端口 ${svc.port} 已被 ${who}${detail ? `（${detail}）` : ''} 占用且不响应 HTTP，无法启动。` +
+          `请先结束该进程，或在服务配置里改用其它端口。`,
+        );
+      }
+    }
 
     this.setStatus(serviceId, 'Starting');
     const sid = sessionId ?? randomUUID();
@@ -135,11 +175,21 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     const env = svc.env_json ? { ...process.env, ...(JSON.parse(svc.env_json) as Record<string, string>) } : process.env;
     const child = spawn(shell, args, { cwd: svc.workdir, env, windowsHide: true, ...(plat.shellFor(svc.start_command).options ?? {}) });
 
-    this.tracked.set(serviceId, { serviceId, sessionId: sid, child, startedAt: Date.now() });
+    this.tracked.set(serviceId, { serviceId, sessionId: sid, child, pid: child.pid, startedAt: Date.now() });
     this.appendSessionPids(sid, child.pid);
 
     child.stdout?.on('data', (d) => this.logs.log({ level: 'info', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: String(d).trim() }));
     child.stderr?.on('data', (d) => this.logs.log({ level: 'error', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: String(d).trim() }));
+    // 启动命令本身无法执行（exe 不存在 / 无执行权限）时，exit 事件不一定触发，这里兜底
+    child.on('error', (e) => {
+      this.tracked.delete(serviceId);
+      this.setStatus(serviceId, 'Failed');
+      this.broadcastServiceEvent(serviceId, svc.project_id);
+      this.logs.log({
+        level: 'error', sourceModule: `service.${svc.name}`, projectId: svc.project_id,
+        message: `无法执行启动命令「${svc.start_command}」：${e.message}（检查 workdir 下文件是否存在、是否有执行权限）`,
+      });
+    });
     child.on('exit', (code) => {
       this.tracked.delete(serviceId);
       const current = this.getStatus(serviceId);
@@ -148,6 +198,19 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
         this.setStatus(serviceId, code === 0 ? 'Stopped' : 'Failed');
         this.broadcastServiceEvent(serviceId, svc.project_id);
         this.logs.log({ level: code === 0 ? 'info' : 'error', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: `service exited code=${code}` });
+        // 失败原因补充：端口被占用是本地服务最常见的崩溃原因，直接点明，省得只看到 code=1
+        if (code !== 0 && svc.port) {
+          void (async () => {
+            const busy = await this.portListening(svc.port!);
+            if (!busy) return;
+            const pid = await this.findListenerPid(svc.port!);
+            const detail = pid ? `（PID ${pid}${await this.describeProcess(pid) ? `，${await this.describeProcess(pid)}` : ''}）` : '';
+            this.logs.log({
+              level: 'error', sourceModule: `service.${svc.name}`, projectId: svc.project_id,
+              message: `启动失败原因：端口 ${svc.port} 已被其它进程占用${detail}。结束该进程后重新启动即可；再次点「启动」会自动接管已在运行的实例。`,
+            });
+          })();
+        }
         // 自愈：on-failure 策略下自动重启，最多 3 次（PRD 3.9 有限且可配置，不允许无限重启）
         if (code !== 0) void this.maybeAutoRestart(serviceId, svc);
       }
@@ -170,7 +233,7 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
   /** 停止单个服务：共享服务引用保护 */
   async stopService(serviceId: string, force = false): Promise<{ stopped: boolean; reason?: string }> {
     const svc = this.ds.db.prepare('SELECT * FROM project_services WHERE id = ?').get(serviceId) as
-      | { id: string; project_id: string; name: string; shared: number }
+      | { id: string; project_id: string; name: string; shared: number; port: number | null }
       | undefined;
     if (!svc) throw new Error('service not found');
 
@@ -198,9 +261,26 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     }
     this.setStatus(serviceId, 'Stopping');
 
+    // 外驻实例（接管来的，不归 DevPilot spawn）：只能按 PID 终止
+    if (t.adopted) {
+      const pid = this.trackedPid(t);
+      if (pid && this.pidAlive(pid)) this.killProcessTree(pid);
+      await new Promise((r) => setTimeout(r, 800));
+      this.tracked.delete(serviceId);
+      this.setStatus(serviceId, 'Stopped');
+      this.broadcastServiceEvent(serviceId, svc.project_id);
+      this.audit.record({
+        subject: 'user:local-user', action: 'service.stop', target: svc.name, result: 'ok',
+        detail: { pid, method: 'adopted-pid' },
+      });
+      this.logs.log({ level: 'info', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: `已终止外部实例 PID ${pid ?? '未知'}（端口 ${svc.port ?? '—'}）` });
+      return { stopped: true };
+    }
+
     // 1) 用户配置的 stop_command 优先（优雅停止），等待最多 5 秒
     const full = this.ds.db.prepare('SELECT stop_command FROM project_services WHERE id = ?').get(serviceId) as { stop_command: string | null };
     let graceful = false;
+    const pid = this.trackedPid(t);
     if (full?.stop_command) {
       const stop = plat.shellFor(full.stop_command);
       spawn(stop.shell, stop.args,
@@ -208,13 +288,14 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       const deadline = Date.now() + 5000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 400));
-        if (t.child.exitCode !== null || !this.pidAlive(t.child.pid)) { graceful = true; break; }
+        if (t.child?.exitCode !== null && t.child?.exitCode !== undefined) { graceful = true; break; }
+        if (!this.pidAlive(pid)) { graceful = true; break; }
       }
       this.logs.log({ level: 'info', sourceModule: 'runtime', message: `service ${svc.name} stop_command issued, graceful=${graceful}` });
     }
 
     // 2) 回退：会话 PID 树强制终止（按 PID，不按名称）
-    if (!graceful) this.killProcessTree(t.child.pid);
+    if (!graceful) this.killProcessTree(pid);
     // 兜底等待退出
     await new Promise((r) => setTimeout(r, 600));
     this.tracked.delete(serviceId);
@@ -222,9 +303,96 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     this.broadcastServiceEvent(serviceId, svc.project_id);
     this.audit.record({
       subject: 'user:local-user', action: 'service.stop', target: svc.name, result: 'ok',
-      detail: { pid: t.child.pid, method: graceful ? 'stop_command' : 'pid-tree' },
+      detail: { pid, method: graceful ? 'stop_command' : 'pid-tree' },
     });
     return { stopped: true };
+  }
+
+  private trackedPid(t: TrackedProcess): number | undefined {
+    return t.pid ?? t.child?.pid;
+  }
+
+  /** 单次端口连通检测（不重试，用于启动前预检） */
+  private portListening(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const sock = net.connect({ host: '127.0.0.1', port, timeout: 1200 });
+      sock.once('connect', () => { sock.destroy(); resolve(true); });
+      sock.once('error', () => { sock.destroy(); resolve(false); });
+      sock.once('timeout', () => { sock.destroy(); resolve(false); });
+    });
+  }
+
+  /** HTTP 探活：任意响应（含 4xx/5xx）即认为该端口上是一个可用的 HTTP 服务 */
+  private httpProbe(port: number, urlPath = '/'): Promise<boolean> {
+    return new Promise((resolve) => {
+      const req = http.get({ host: '127.0.0.1', port, path: urlPath, timeout: 2500, headers: { 'User-Agent': 'DevPilot-probe' } }, (res) => {
+        res.resume();
+        resolve(true);
+      });
+      req.on('timeout', () => { req.destroy(); resolve(false); });
+      req.on('error', () => resolve(false));
+    });
+  }
+
+  /** health_check_json 里若给了 http 探针路径则用它，否则探 / */
+  private healthPath(svc: { health_check_json?: string | null }): string {
+    try {
+      if (!svc.health_check_json) return '/';
+      const h = JSON.parse(svc.health_check_json) as { path?: string; url?: string };
+      if (h?.path) return h.path;
+      if (h?.url) {
+        const u = new URL(h.url);
+        return `${u.pathname}${u.search}` || '/';
+      }
+    } catch { /* 配置非法则用默认 */ }
+    return '/';
+  }
+
+  /** 按端口反查监听进程 PID（Windows netstat / *nix lsof），失败返回 undefined */
+  private findListenerPid(port: number): Promise<number | undefined> {
+    return new Promise((resolve) => {
+      const isWin = process.platform === 'win32';
+      const cmd = isWin ? 'netstat' : 'lsof';
+      const args = isWin ? ['-ano', '-p', 'TCP'] : ['-ti', `tcp:${port}`, '-sTCP:LISTEN'];
+      execFile(cmd, args, { windowsHide: true, timeout: 5000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+        if (err && !stdout) return resolve(undefined);
+        try {
+          if (isWin) {
+            for (const line of String(stdout).split(/\r?\n/)) {
+              if (!/LISTENING/i.test(line)) continue;
+              const cols = line.trim().split(/\s+/);
+              const local = cols[1] ?? '';
+              if (!local.endsWith(`:${port}`)) continue;
+              const pid = Number(cols[cols.length - 1]);
+              if (Number.isFinite(pid) && pid > 0) return resolve(pid);
+            }
+            return resolve(undefined);
+          }
+          const pid = Number(String(stdout).trim().split(/\s+/)[0]);
+          resolve(Number.isFinite(pid) && pid > 0 ? pid : undefined);
+        } catch { resolve(undefined); }
+      });
+    });
+  }
+
+  /** 进程名 + 可执行路径，用于把"端口被谁占用"讲清楚 */
+  private describeProcess(pid: number): Promise<string> {
+    if (process.platform !== 'win32') {
+      return new Promise((resolve) => execFile('ps', ['-p', String(pid), '-o', 'comm='], { timeout: 4000 }, (_e, out) => resolve(String(out ?? '').trim())));
+    }
+    return new Promise((resolve) => {
+      execFile('powershell', ['-NoProfile', '-Command', `(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).ProcessName`], { windowsHide: true, timeout: 6000 }, (_e, out) => {
+        const name = String(out ?? '').trim();
+        resolve(name ? `${name}.exe` : '');
+      });
+    });
+  }
+
+  /** 当前被跟踪的服务（含接管状态），供运行中心区分「DevPilot 启动」与「外部实例」 */
+  trackedServices(): Array<{ serviceId: string; sessionId: string; pid?: number; adopted: boolean; startedAt: number }> {
+    return [...this.tracked.values()].map((t) => ({
+      serviceId: t.serviceId, sessionId: t.sessionId, pid: this.trackedPid(t), adopted: !!t.adopted, startedAt: t.startedAt,
+    }));
   }
 
   private getServiceWorkdir(serviceId: string): string {

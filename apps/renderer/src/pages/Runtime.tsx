@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Button, message, Modal, Select, Space, Table, Typography } from 'antd';
+import { Button, message, Modal, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import { api } from '../api';
 import { Mono, PageHeader, SectionCard, StateBlock, StatusTag } from '../components/ui';
 import { formatTime } from '../utils';
@@ -10,6 +10,7 @@ export default function Runtime({ go }: { go: (k: string) => void }) {
   const [projectId, setProjectId] = useState<string | null>(null);
   const [services, setServices] = useState<any[]>([]);
   const [sessions, setSessions] = useState<any[]>([]);
+  const [tracked, setTracked] = useState<Record<string, { adopted?: boolean; pid?: number }>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, boolean>>({});
@@ -20,9 +21,15 @@ export default function Runtime({ go }: { go: (k: string) => void }) {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [p, s] = await Promise.all([api<any[]>('/projects'), api<any[]>('/runtime/sessions')]);
+      const [p, s, t] = await Promise.all([
+        api<any[]>('/projects'),
+        api<any[]>('/runtime/sessions'),
+        api<any[]>('/runtime/tracked').catch(() => [] as any[]),
+      ]);
       setProjects(Array.isArray(p) ? p : []);
       setSessions(Array.isArray(s) ? s : []);
+      setTracked(Object.fromEntries((Array.isArray(t) ? t : []).map((x: any) => [x.serviceId, x])));
+
       return Array.isArray(p) ? p : [];
     } catch (e: any) {
       setError(e?.message ?? String(e));
@@ -148,7 +155,22 @@ export default function Runtime({ go }: { go: (k: string) => void }) {
               { title: '服务', dataIndex: 'name', render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
               { title: '类型', dataIndex: 'service_type', width: 100 },
               { title: '端口', dataIndex: 'port', width: 80, render: (v) => v ?? '-' },
-              { title: '状态', dataIndex: 'status', width: 100, render: (s: string) => <StatusTag status={s} /> },
+              {
+                title: '状态', dataIndex: 'status', width: 150,
+                render: (s: string, r: any) => {
+                  const t = tracked[r.id];
+                  return (
+                    <Space size={4}>
+                      <StatusTag status={s} />
+                      {t?.adopted && (
+                        <Tooltip title={`端口上已有实例在运行（PID ${t.pid ?? '未知'}），由 DevPilot 接管而未重复启动；点「停止」会终止该进程`}>
+                          <Tag color="blue" style={{ marginInlineEnd: 0 }}>外部实例</Tag>
+                        </Tooltip>
+                      )}
+                    </Space>
+                  );
+                },
+              },
               { title: '启动命令', dataIndex: 'start_command', ellipsis: true, render: (v: string) => <Mono title={v}>{v}</Mono> },
               {
                 title: '操作', width: 150, render: (_, s) => (

@@ -135,7 +135,15 @@ export class ModelService {
     return this.providerKeyConfigured(provider);
   }
 
-  /** 异步补读 OS 凭据存储（同步路径未命中时调用一次） */
+  /** 环境变量兜底：DEVIPILOT_<PROVIDER>_API_KEY（容器 / 打包态 / 不想落盘时使用） */
+  private envKey(provider: string): string | null {
+    const v = process.env[`DEVIPILOT_${provider.toUpperCase()}_API_KEY`];
+    return v && v.trim() ? v.trim() : null;
+  }
+
+  /** 异步补读 Key：OS 凭据存储优先，其次环境变量。
+   *  修复：旧实现只把 vault 的 key 写回 apiKey，env 变量虽被 hasKey() 认作"已配置"，
+   *  却没有真正加载 → chatOnce 里 apiKeyFor 返回 null，报「供应商 x 无可用 Key」。 */
   async loadKeyFromStore(provider = this.activeProvider): Promise<boolean> {
     if (provider === this.activeProvider && this.apiKey) return true;
     const key = await credentials.getPassword('DevPilot', provider);
@@ -143,6 +151,13 @@ export class ModelService {
       this.activeProvider = provider;
       this.apiKey = key;
       this.keyBackend = credentials.backend;
+      return true;
+    }
+    const fromEnv = this.envKey(provider);
+    if (fromEnv) {
+      this.activeProvider = provider;
+      this.apiKey = fromEnv;
+      this.keyBackend = 'env';
       return true;
     }
     return this.hasKey(provider);
@@ -201,6 +216,9 @@ export class ModelService {
     // 其他供应商：凭据存储热读（vault/文件），缓存到内存避免重复 IO
     const cached = (this as any)._keyCache as Map<string, string> | undefined;
     if (cached?.has(providerId)) return cached.get(providerId) ?? null;
+    // 环境变量兜底（与 loadKeyFromStore 保持一致，避免"配置了但读不到"）
+    const fromEnv = this.envKey(providerId);
+    if (fromEnv) return fromEnv;
     return null;
   }
 
