@@ -1,0 +1,112 @@
+/* DevPilot 全局桌面样式：浅色层次、细边框、可见焦点态 */
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: #F6F7F9; color: #1F2329; }
+
+/* 键盘焦点：统一可见轮廓 */
+:focus-visible {
+  outline: 2px solid #2563EB !important;
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+.ant-btn:focus-visible, .ant-menu-item:focus-visible, a:focus-visible {
+  outline: 2px solid #2563EB !important;
+  outline-offset: 2px;
+}
+
+/* 侧栏 */
+.dp-sider {
+  background: #FBFBFC !important;
+  border-right: 1px solid #E4E7EC;
+}
+.dp-sider .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.dp-sider .ant-menu { background: transparent; border-inline-end: none !important; }
+.dp-sider .ant-menu-item-group-title {
+  padding: 14px 16px 4px !important;
+  font-size: 12px;
+  color: #98A2B3;
+  letter-spacing: 0.02em;
+}
+.dp-sider .ant-menu-item {
+  height: 32px !important;
+  line-height: 32px !important;
+  margin-block: 1px !important;
+  font-size: 13px;
+}
+.dp-sider .ant-menu-item-selected {
+  font-weight: 500;
+  box-shadow: inset 2px 0 0 #2563EB;
+}
+.dp-brand {
+  display: flex; align-items: center; gap: 8px;
+  padding: 14px 16px 10px;
+  font-size: 15px; font-weight: 600; color: #1F2329;
+}
+.dp-brand-badge {
+  width: 22px; height: 22px; border-radius: 6px;
+  background: #1F2329; color: #fff;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700;
+}
+.dp-sider-footer {
+  margin-top: auto;
+  border-top: 1px solid #E4E7EC;
+  padding: 8px 12px 10px;
+}
+.dp-backend {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #667085; padding: 4px 4px 0;
+}
+.dp-dot { width: 7px; height: 7px; border-radius: 50%; background: #98A2B3; flex: none; }
+.dp-dot.ok { background: #15803D; }
+.dp-dot.bad { background: #DC2626; }
+
+/* 顶栏 */
+.dp-header {
+  background: #FFFFFF;
+  border-bottom: 1px solid #E4E7EC;
+  padding: 0 20px;
+  height: 52px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+}
+.dp-header .ant-breadcrumb { font-size: 12px; color: #98A2B3; }
+.dp-page-title { font-size: 15px; font-weight: 600; color: #1F2329; }
+
+/* 内容画布 */
+.dp-content { padding: 20px; overflow: auto; }
+.dp-page { max-width: 1280px; margin: 0 auto; }
+@media (max-width: 1100px) { .dp-content { padding: 14px; } }
+
+/* 卡片：白底细边、无阴影 */
+.ant-card { border: 1px solid #E4E7EC; }
+.ant-card .ant-card-head { min-height: 42px; padding: 0 16px; border-bottom-color: #F0F1F3; }
+.ant-card .ant-card-head-title { font-size: 13px; font-weight: 600; }
+.ant-card-bordered { box-shadow: none; }
+
+/* 表格 */
+.ant-table-thead > tr > th { font-weight: 500; font-size: 12px; }
+.ant-table { font-size: 13px; }
+
+/* 状态行 */
+.dp-status-row { display: inline-flex; align-items: center; gap: 6px; }
+
+/* 等宽文本（路径 / 命令 / 日志） */
+.dp-mono { font-family: "Cascadia Code", Consolas, "Courier New", monospace; font-size: 12px; }
+
+/* 描述文本 */
+.dp-desc { color: #667085; font-size: 12px; margin: 2px 0 0; }
+
+/* 滚动条收敛 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #D0D5DD; border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

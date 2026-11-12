@@ -35,3 +35,6 @@ apps/desktop/resources-backend.trash-*/
 apps/desktop/build/*
 !apps/desktop/build/icon.png
 !apps/desktop/build/icon.ico
+
+# UI 自审截图产物
+apps/renderer/shots/
