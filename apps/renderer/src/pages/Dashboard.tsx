@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Button, Card, Col, Input, List, message, Row, Space, Typography } from 'antd';
 import { api } from '../api';
+import { useAutoStart } from '../components/AutoStart';
 import { Mono, PageHeader, SectionCard, StateBlock, StatusTag } from '../components/ui';
 
 
@@ -16,6 +17,7 @@ export default function Dashboard({ go, onOpenProject }: {
   const [error, setError] = useState<string | null>(null);
   const [importPath, setImportPath] = useState('');
   const [importing, setImporting] = useState(false);
+  const auto = useAutoStart();
 
   const load = useCallback(async () => {
     setError(null);
@@ -44,6 +46,7 @@ export default function Dashboard({ go, onOpenProject }: {
     try {
       const r = await api<{ projectId: string; analysis: any }>('/projects/import', 'POST', { source: 'folder', rootPath: importPath.trim() });
       message.success(`导入成功：识别 ${r.analysis.services.length} 个服务，${r.analysis.unknowns.length} 项待确认`);
+      void auto.run(r.projectId, importPath.trim().split(/[\\/]/).filter(Boolean).pop() ?? '新项目');
       setImportPath('');
       await load();
       onOpenProject(r.projectId);
@@ -160,6 +163,7 @@ export default function Dashboard({ go, onOpenProject }: {
           </SectionCard>
         </Col>
       </Row>
+      {auto.node}
     </div>
   );
 }

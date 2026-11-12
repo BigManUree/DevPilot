@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Button, Descriptions, Drawer, Dropdown, Input, message, Modal, Space, Table, Tabs, Typography } from 'antd';
 import { api } from '../api';
+import { useAutoStart } from '../components/AutoStart';
 import { Mono, PageHeader, StateBlock, StatusTag } from '../components/ui';
 
 /** 项目：搜索/筛选、识别与配置确认、详情抽屉。危险操作明确区分「删记录」与「动磁盘」。 */
@@ -13,6 +14,7 @@ export default function Projects({ selectedId, onSelect }: { selectedId: string 
   const [keyword, setKeyword] = useState('');
   const [detail, setDetail] = useState<any>(null);
   const [pending, setPending] = useState<Record<string, boolean>>({});
+  const auto = useAutoStart();
 
   const load = useCallback(async () => {
     setError(null);
@@ -47,9 +49,12 @@ export default function Projects({ selectedId, onSelect }: { selectedId: string 
     try {
       const r = await api<{ projectId: string; analysis: any }>('/projects/import', 'POST', { source: 'folder', rootPath: importPath.trim() });
       message.success(`导入成功：识别 ${r.analysis.services.length} 个服务，${r.analysis.unknowns.length} 项待确认`);
+      const name = importPath.trim().split(/[\\/]/).filter(Boolean).pop() ?? '新项目';
       setImportPath('');
       await load();
       await openDetail(r.projectId);
+      // 导入即自动启动：优先项目自带一键脚本，失败由 Agent 自动修复重试
+      void auto.run(r.projectId, name);
     } catch (e: any) {
       message.error('导入失败：' + (e?.message ?? String(e)));
     } finally {
@@ -156,7 +161,8 @@ export default function Projects({ selectedId, onSelect }: { selectedId: string 
             {
               title: '操作', width: 260, render: (_, r) => (
                 <Space size={4} onClick={(e) => e.stopPropagation()}>
-                  <Button size="small" type="primary" loading={busy(`start-${r.id}`)} onClick={() => void startProject(r.id)}>启动</Button>
+                  <Button size="small" type="primary" onClick={() => void auto.run(r.id, r.name)}>自动启动</Button>
+                  <Button size="small" loading={busy(`start-${r.id}`)} onClick={() => void startProject(r.id)}>启动</Button>
                   <Button size="small" loading={busy(`stop-${r.id}`)} onClick={() => void stopProject(r.id)}>停止</Button>
                   <Dropdown
                     menu={{
@@ -183,6 +189,8 @@ export default function Projects({ selectedId, onSelect }: { selectedId: string 
         />
       </StateBlock>
 
+      {auto.node}
+
       <Drawer
         open={!!detail}
         onClose={() => { setDetail(null); onSelect(null); }}
@@ -191,7 +199,8 @@ export default function Projects({ selectedId, onSelect }: { selectedId: string 
         extra={
           detail && (
             <Space>
-              <Button size="small" type="primary" loading={busy(`start-${detail.project.id}`)} onClick={() => void startProject(detail.project.id)}>启动</Button>
+              <Button size="small" type="primary" onClick={() => void auto.run(detail.project.id, detail.project.name)}>自动启动</Button>
+              <Button size="small" loading={busy(`start-${detail.project.id}`)} onClick={() => void startProject(detail.project.id)}>启动</Button>
               <Button size="small" loading={busy(`stop-${detail.project.id}`)} onClick={() => void stopProject(detail.project.id)}>停止</Button>
             </Space>
           )

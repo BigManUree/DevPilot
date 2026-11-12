@@ -227,11 +227,25 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       }
     });
 
-    // 健康检查（端口探活）
-    const healthy = svc.port ? await this.waitPort(svc.port, 15000) : true;
+    // 健康检查（端口探活）：25s 覆盖 streamlit / vite 这类冷启动较慢的服务
+    const healthy = svc.port ? await this.waitPort(svc.port, 25000) : true;
     if (!healthy) {
+      // 进程已经退出时不能标 Unhealthy：那是崩溃（Failed），否则会被上层误判成"还在跑但没监听"
+      if (child.exitCode !== null) {
+        this.setStatus(serviceId, 'Failed');
+        this.broadcastServiceEvent(serviceId, svc.project_id);
+        this.logs.log({
+          level: 'error', sourceModule: `service.${svc.name}`, projectId: svc.project_id,
+          message: `服务在端口 ${svc.port} 就绪前已退出（exit=${child.exitCode}），判定为启动失败`,
+        });
+        return { status: 'Failed', pid: child.pid };
+      }
       this.setStatus(serviceId, 'Unhealthy');
       this.broadcastServiceEvent(serviceId, svc.project_id);
+      this.logs.log({
+        level: 'warn', sourceModule: `service.${svc.name}`, projectId: svc.project_id,
+        message: `进程在运行，但 ${svc.port} 端口 25s 内未监听（可能还没启动完，或监听在其它端口）`,
+      });
       return { status: 'Unhealthy', pid: child.pid };
     }
 

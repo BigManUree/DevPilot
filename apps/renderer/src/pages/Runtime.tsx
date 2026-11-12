@@ -3,6 +3,7 @@ import { Button, message, Modal, Select, Space, Table, Tag, Tooltip, Typography 
 import { api } from '../api';
 import { Mono, PageHeader, SectionCard, StateBlock, StatusTag } from '../components/ui';
 import { formatTime } from '../utils';
+import { useAutoStart } from '../components/AutoStart';
 
 /** 运行中心：项目为上下文，服务按行呈现，启停有进度与防重复。 */
 export default function Runtime({ go }: { go: (k: string) => void }) {
@@ -14,6 +15,7 @@ export default function Runtime({ go }: { go: (k: string) => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, boolean>>({});
+  const auto = useAutoStart();
 
   const busy = (k: string) => !!pending[k];
   const mark = (k: string, v: boolean) => setPending((p) => ({ ...p, [k]: v }));
@@ -130,7 +132,8 @@ export default function Runtime({ go }: { go: (k: string) => void }) {
               onChange={(v) => void chooseProject(v)}
               options={projects.map((p) => ({ value: p.id, label: p.name }))}
             />
-            <Button type="primary" disabled={!projectId} loading={busy('proj-start')} onClick={() => void startProject()}>启动全部</Button>
+            <Button type="primary" disabled={!projectId} onClick={() => projectId && void auto.run(projectId, currentProject?.name ?? '项目')}>自动启动（含修复）</Button>
+            <Button disabled={!projectId} loading={busy('proj-start')} onClick={() => void startProject()}>启动全部</Button>
             <Button disabled={!projectId} loading={busy('proj-stop')} onClick={() => void stopProject()}>停止全部</Button>
           </Space>
         }
@@ -201,6 +204,7 @@ export default function Runtime({ go }: { go: (k: string) => void }) {
           />
         </StateBlock>
       </SectionCard>
+      {auto.node}
     </div>
   );
 }
