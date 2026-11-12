@@ -178,8 +178,19 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     this.tracked.set(serviceId, { serviceId, sessionId: sid, child, pid: child.pid, startedAt: Date.now() });
     this.appendSessionPids(sid, child.pid);
 
-    child.stdout?.on('data', (d) => this.logs.log({ level: 'info', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: String(d).trim() }));
-    child.stderr?.on('data', (d) => this.logs.log({ level: 'error', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: String(d).trim() }));
+    // 输出级别按内容判定，而不是"stderr 一律 error"：
+    // Go/Java 等程序把 INFO 也写 stderr（如 wb2api），旧逻辑会把正常运行日志全标红，
+    // 既误导人，也会把错误日志喂给诊断 Agent 得出错误根因。
+    const emit = (chunk: Buffer | string) => {
+      const text = String(chunk).trim();
+      if (!text) return;
+      for (const line of text.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        this.logs.log({ level: this.classifyLog(line), sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: line });
+      }
+    };
+    child.stdout?.on('data', emit);
+    child.stderr?.on('data', emit);
     // 启动命令本身无法执行（exe 不存在 / 无执行权限）时，exit 事件不一定触发，这里兜底
     child.on('error', (e) => {
       this.tracked.delete(serviceId);
@@ -306,6 +317,13 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       detail: { pid, method: graceful ? 'stop_command' : 'pid-tree' },
     });
     return { stopped: true };
+  }
+
+  /** 从单行日志推断级别（stderr 不等于错误：很多运行时会话都写 stderr） */
+  private classifyLog(line: string): 'error' | 'warn' | 'info' {
+    if (/\b(fatal|panic|traceback)\b|\bERROR\b|\bERR\b|错误|失败|异常|cannot|refused|denied|not found|EADDRINUSE|bind:/i.test(line)) return 'error';
+    if (/\bWARN\b|\bWARNING\b|警告|deprecated|retry|timed? ?out/i.test(line)) return 'warn';
+    return 'info';
   }
 
   private trackedPid(t: TrackedProcess): number | undefined {
