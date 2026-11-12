@@ -102,8 +102,12 @@ export default function Dashboard({ go, onOpenProject }: {
                         </Space>
                       }
                       description={
-                        <Space size={8} style={{ marginTop: 4 }}>
+                        <Space size={8} style={{ marginTop: 4 }} wrap>
                           <StatusTag status={p.analysis_status === 'confirmed' ? 'Completed' : 'Pending'} text={p.analysis_status === 'confirmed' ? '配置已确认' : '待确认配置'} />
+                          <span style={{ fontSize: 12, color: colors.textSecondary }}>
+                            {p.service_count ?? 0} 个服务
+                            {(p.running_count ?? 0) > 0 && <span style={{ color: colors.success }}> · {p.running_count} 运行中</span>}
+                          </span>
                           <Mono title={p.root_path}>{p.root_path}</Mono>
                         </Space>
                       }

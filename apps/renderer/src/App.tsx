@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ConfigProvider, Typography, Table, Button, Input, Space, Tag, Card,
-  Modal, message, List, Tabs, Descriptions, Select, Badge, Steps, Result,
+  Modal, message, List, Tabs, Descriptions, Select, Badge, Steps, Result, Segmented,
 } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { api, wsUrl } from './api';
@@ -9,12 +9,21 @@ import '@xterm/xterm/css/xterm.css';
 import MonacoEditor from '@monaco-editor/react';
 import { antdTheme } from './theme';
 import Shell, { PAGES } from './components/Shell';
-import { Mono, PageHeader, statusColor } from './components/ui';
+import { Mono, PageHeader, SectionCard, StateBlock, StatusTag, statusColor } from './components/ui';
 import { formatTime } from './utils';
 import Dashboard from './pages/Dashboard';
 import Projects from './pages/Projects';
 import Runtime from './pages/Runtime';
 import './styles.css';
+
+/** 删除类操作统一确认：说明删除范围，避免误点 */
+function confirmDelete(title: string, content: string, onOk: () => Promise<void>) {
+  Modal.confirm({
+    title, content,
+    okText: '删除', okButtonProps: { danger: true }, cancelText: '取消',
+    onOk: async () => { try { await onOk(); } catch (e: any) { message.error('删除失败：' + (e?.message ?? String(e))); } },
+  });
+}
 
 /* ---------- 任务中心 ---------- */
 function Tasks() {
@@ -96,23 +105,34 @@ function Tasks() {
 function Terminal() {
   const [sessions, setSessions] = useState<any[]>([]);
   const [active, setActive] = useState<string | null>(null);
+  const [wsState, setWsState] = useState<'connecting' | 'open' | 'closed'>('connecting');
+  const [wsKey, setWsKey] = useState(0);
+  const [creating, setCreating] = useState(false);
+  const [closing, setClosing] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const termRef = useRef<{ term: any; fit: any } | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const activeRef = useRef<string | null>(null);
-  // 每会话独立输出缓冲（切会话时回放）
+  // 每会话独立输出缓冲（切会话时回放），单会话字符上限防止长跑实例吃内存
   const buffersRef = useRef<Map<string, string>>(new Map());
   const [logLines, setLogLines] = useState<string[]>([]);
+  const BUF_LIMIT = 300_000;
 
-  const load = React.useCallback(async () => setSessions(await api('/terminal/sessions')), []);
+  const load = React.useCallback(async () => {
+    try { setSessions(await api('/terminal/sessions')); } catch (e: any) { message.error(e?.message ?? String(e)); }
+  }, []);
   useEffect(() => { void load(); }, [load]);
 
   // 全局 WS：按 payload.sessionId 路由到对应缓冲
   useEffect(() => {
     let alive = true;
+    setWsState('connecting');
     void (async () => {
       const ws = new WebSocket(await wsUrl());
       wsRef.current = ws;
+      ws.onopen = () => { if (alive) setWsState('open'); };
+      ws.onclose = () => { if (alive) setWsState('closed'); };
+      ws.onerror = () => { if (alive) setWsState('closed'); };
       ws.onmessage = (ev) => {
         if (!alive) return;
         try {
@@ -120,15 +140,16 @@ function Terminal() {
           if (evt.event_type === 'terminal.data') {
             const sid = evt.payload.sessionId as string;
             const chunk = evt.payload.data as string;
-            buffersRef.current.set(sid, (buffersRef.current.get(sid) ?? '') + chunk);
+            const next = (buffersRef.current.get(sid) ?? '') + chunk;
+            buffersRef.current.set(sid, next.length > BUF_LIMIT ? next.slice(-BUF_LIMIT) : next);
             if (sid === activeRef.current && termRef.current) termRef.current.term.write(chunk);
           }
-          if (evt.event_type === 'runtime.log') setLogLines((l) => [...l.slice(-500), `[${evt.severity}] ${evt.source_module}: ${evt.payload.message}`]);
+          if (evt.event_type === 'runtime.log') setLogLines((l) => [...l.slice(-200), `[${evt.severity}] ${evt.source_module}: ${evt.payload.message}`]);
         } catch { /* 忽略非 JSON 帧 */ }
       };
     })();
     return () => { alive = false; wsRef.current?.close(); };
-  }, []);
+  }, [wsKey]);
 
   // 挂载 xterm 实例（active 变化时重建并回放缓冲）
   useEffect(() => {
@@ -136,7 +157,18 @@ function Terminal() {
     if (!active || !hostRef.current) return;
     Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')]).then(([{ Terminal }, { FitAddon }]) => {
       const fit = new FitAddon();
-      const term = new Terminal({ fontSize: 13, theme: { background: '#0d1117' }, convertEol: true });
+      const term = new Terminal({
+        fontSize: 13,
+        fontFamily: '"Cascadia Code", Consolas, "Courier New", monospace',
+        cursorBlink: true,
+        convertEol: true,
+        theme: {
+          background: '#171A1F', foreground: '#E4E7EC', cursor: '#60A5FA',
+          selectionBackground: '#2B3446',
+          black: '#1F2329', red: '#F26D6D', green: '#7CCF9B', yellow: '#E8C579',
+          blue: '#7AA7F0', magenta: '#C79BE8', cyan: '#7FD3D3', white: '#E4E7EC',
+        },
+      });
       term.loadAddon(fit);
       term.open(hostRef.current!);
       try { fit.fit(); } catch { /* 容器未就绪 */ }
@@ -144,46 +176,87 @@ function Terminal() {
       term.onData((d: string) => {
         if (activeRef.current) wsRef.current?.send(JSON.stringify({ event: 'terminal.input', data: { sessionId: activeRef.current, data: d } }));
       });
+      const onResize = () => { try { fit.fit(); } catch { /* 忽略 */ } };
+      window.addEventListener('resize', onResize);
       termRef.current = { term, fit };
+      return () => window.removeEventListener('resize', onResize);
     });
     return () => { termRef.current?.term.dispose(); termRef.current = null; };
   }, [active]);
 
   const createSession = async () => {
-    const r = await api<{ sessionId: string }>('/terminal/sessions', 'POST', {});
-    setActive(r.sessionId);
-    void load();
+    if (creating) return;
+    setCreating(true);
+    try {
+      const r = await api<{ sessionId: string }>('/terminal/sessions', 'POST', {});
+      setActive(r.sessionId);
+      await load();
+    } catch (e: any) {
+      message.error('新建终端失败：' + (e?.message ?? String(e)));
+    } finally {
+      setCreating(false);
+    }
   };
 
-  const killSession = async (sid: string) => {
-    await api(`/terminal/sessions/${sid}`, 'DELETE');
-    buffersRef.current.delete(sid);
-    if (active === sid) setActive(null);
-    void load();
+  const killSession = (sid: string) => {
+    Modal.confirm({
+      title: '关闭这个终端会话？',
+      content: '该会话中正在运行的命令会被终止，其他会话不受影响。',
+      okText: '关闭会话',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setClosing(true);
+        try {
+          await api(`/terminal/sessions/${sid}`, 'DELETE');
+          buffersRef.current.delete(sid);
+          if (active === sid) setActive(null);
+          await load();
+        } catch (e: any) {
+          message.error('关闭失败：' + (e?.message ?? String(e)));
+        } finally {
+          setClosing(false);
+        }
+      },
+    });
   };
+
+  const sessionLabel = (s: any) => s.cwd?.split(/[\\/]/).pop() || s.sessionId.slice(0, 8);
+  const wsText = wsState === 'open' ? '已连接' : wsState === 'connecting' ? '连接中' : '已断开';
 
   return (
-    <Space direction="vertical" style={{ width: '100%' }}>
-      <Card title="终端会话（xterm.js）" extra={<Button onClick={createSession}>新建终端</Button>} size="small">
-        <Space wrap>
-          {sessions.map((s) => (
-            <Tag key={s.sessionId} color={active === s.sessionId ? 'blue' : 'default'} style={{ cursor: 'pointer' }}
-              onClick={() => setActive(s.sessionId)}
-              closable onClose={(e) => { e.preventDefault(); void killSession(s.sessionId); }}>
-              {s.cwd?.split(/[\\/]/).pop() || s.sessionId.slice(0, 8)}
-            </Tag>
-          ))}
+    <div>
+      <SectionCard
+        title="终端会话"
+        extra={<Button size="small" type="primary" loading={creating} onClick={() => void createSession()}>新建终端</Button>}
+        style={{ marginBottom: 16 }}
+      >
+        <Space wrap style={{ marginBottom: sessions.length ? 12 : 0 }}>
+          {sessions.length > 0 ? (
+            <Segmented
+              value={active ?? undefined}
+              onChange={(v) => setActive(String(v))}
+              options={sessions.map((s) => ({ value: s.sessionId, label: sessionLabel(s) }))}
+            />
+          ) : <span className="dp-desc">还没有终端会话。新建后即可在当前目录直接执行命令。</span>}
+          {active && <Button size="small" danger ghost loading={closing} onClick={() => killSession(active)}>关闭当前会话</Button>}
+          <span className="dp-status-row" style={{ marginLeft: 'auto' }}>
+            <span className={`dp-dot ${wsState === 'open' ? 'ok' : wsState === 'closed' ? 'bad' : ''}`} />
+            <span style={{ fontSize: 12, color: '#667085' }}>推送 {wsText}</span>
+            {wsState === 'closed' && <Button size="small" type="link" onClick={() => setWsKey((k) => k + 1)}>重连</Button>}
+          </span>
         </Space>
-      </Card>
-      <Card size="small" title={active ? `终端 ${active.slice(0, 8)}（直接键入，Ctrl+C 支持）` : '未选中会话'}>
-        <div ref={hostRef} style={{ height: 380, background: '#0d1117' }} />
-      </Card>
-      <Card size="small" title={`实时日志流（${logLines.length}）`}>
-        <pre style={{ maxHeight: 200, overflow: 'auto', fontSize: 12 }}>
-          {logLines.slice(-30).join('\n') || '（等待事件）'}
+        <div style={{ border: '1px solid #E4E7EC', borderRadius: 8, overflow: 'hidden', background: '#171A1F' }}>
+          <div ref={hostRef} style={{ height: 400, padding: 8 }} />
+        </div>
+        {!active && <p className="dp-desc" style={{ marginTop: 8 }}>选择或新建一个会话后，这里显示交互式终端。</p>}
+      </SectionCard>
+
+      <SectionCard title={`实时日志流（${logLines.length}）`}>
+        <pre className="dp-mono" style={{ maxHeight: 180, overflow: 'auto', margin: 0, color: '#475467', background: '#FAFAFB', border: '1px solid #F0F1F3', borderRadius: 6, padding: 8 }}>
+          {logLines.slice(-40).join('\n') || '（等待运行时事件）'}
         </pre>
-      </Card>
-    </Space>
+      </SectionCard>
+    </div>
   );
 }
 
@@ -195,48 +268,145 @@ function Logs() {
   const [logExcerpt, setLogExcerpt] = useState('');
   const [verifyCmd, setVerifyCmd] = useState('node --version');
   const [diag, setDiag] = useState<any>(null);
+  const [running, setRunning] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const load = React.useCallback(async () => {
-    const qs = new URLSearchParams();
-    if (level) qs.set('level', level);
-    if (source) qs.set('sourceModule', source);
-    const r = await api<{ rows: any[] }>(`/logs?${qs}`);
-    setRows(r.rows);
+    setError(null);
+    try {
+      const qs = new URLSearchParams();
+      if (level) qs.set('level', level);
+      if (source) qs.set('sourceModule', source);
+      const r = await api<{ rows: any[] }>(`/logs?${qs}`);
+      setRows(r.rows ?? []);
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setLoading(false);
+    }
   }, [level, source]);
   useEffect(() => { void load(); }, [load]);
 
-  const runDiagnose = async () => {
-    const r = await api('/diagnostics', 'POST', { logExcerpt, verifyCommand: verifyCmd });
-    setDiag(r);
-    message.info(`诊断状态：${(r as any).status}`);
+  const runDiagnose = () => {
+    if (!logExcerpt.trim()) { message.warning('先粘贴需要诊断的错误日志'); return; }
+    Modal.confirm({
+      title: '开始 AI 诊断修复？',
+      content: (
+        <div>
+          <p>诊断会把下面两段内容发给当前模型：日志摘录（{logExcerpt.length} 字符）、验证命令。</p>
+          <p>模型给出的文件修改会先备份再写入，写入与命令执行都经过审批门；验证失败会自动回滚。</p>
+          {verifyCmd.trim() && <p className="dp-mono" style={{ fontSize: 12 }}>验证命令：{verifyCmd}</p>}
+        </div>
+      ),
+      okText: '开始诊断',
+      onOk: async () => {
+        setRunning(true);
+        setDiag(null);
+        try {
+          const r = await api<any>('/diagnostics', 'POST', { logExcerpt, verifyCommand: verifyCmd || undefined });
+          setDiag(r);
+          message.info(`诊断状态：${r?.status ?? '未知'}`);
+        } catch (e: any) {
+          message.error('诊断失败：' + (e?.message ?? String(e)));
+        } finally {
+          setRunning(false);
+        }
+      },
+    });
+  };
+
+  const diffLineStyle = (line: string): React.CSSProperties => {
+    if (line.startsWith('+')) return { background: '#ECFDF3', color: '#15803D' };
+    if (line.startsWith('-')) return { background: '#FEF3F2', color: '#B42318' };
+    if (line.startsWith('@@')) return { color: '#667085' };
+    return {};
   };
 
   return (
-    <Space direction="vertical" style={{ width: '100%' }}>
-      <Card size="small" title="AI 诊断修复">
+    <div>
+      <SectionCard title="AI 诊断修复" style={{ marginBottom: 16 }}>
+        <p className="dp-desc" style={{ marginTop: 0, marginBottom: 10 }}>
+          流程：读日志 → 模型定位根因 → 生成文件级修复 → 备份 → 写入（审批门）→ 验证命令 → 失败自动回滚。
+        </p>
         <Space direction="vertical" style={{ width: '100%' }}>
-          <Input.TextArea rows={4} placeholder="粘贴错误日志" value={logExcerpt} onChange={(e) => setLogExcerpt(e.target.value)} />
-          <Input value={verifyCmd} onChange={(e) => setVerifyCmd(e.target.value)} placeholder="验证命令" />
-          <Button type="primary" onClick={runDiagnose}>诊断并修复</Button>
-          {diag && <pre style={{ maxHeight: 240, overflow: 'auto', fontSize: 12 }}>{JSON.stringify(diag, null, 2)}</pre>}
+          <Input.TextArea rows={4} placeholder="粘贴错误日志或堆栈" value={logExcerpt} onChange={(e) => setLogExcerpt(e.target.value)} />
+          <Input
+            value={verifyCmd}
+            onChange={(e) => setVerifyCmd(e.target.value)}
+            placeholder="验证命令（留空则不做执行验证）"
+            addonBefore="验证"
+          />
+          <div>
+            <Button type="primary" loading={running} onClick={runDiagnose}>诊断并修复</Button>
+          </div>
+
+          {diag && (
+            <div style={{ borderTop: '1px solid #F0F1F3', paddingTop: 12 }}>
+              <Space size={8} style={{ marginBottom: 8 }}>
+                <StatusTag status={diag.status ?? 'Unknown'} />
+                {diag.diagnosisId && <Mono>诊断 {String(diag.diagnosisId).slice(0, 8)}</Mono>}
+              </Space>
+              {diag.analysis && (
+                <div style={{ background: '#FAFAFB', border: '1px solid #F0F1F3', borderRadius: 6, padding: 10, whiteSpace: 'pre-wrap', fontSize: 13, marginBottom: 10 }}>
+                  {diag.analysis}
+                </div>
+              )}
+              {(diag.diffs ?? []).length > 0 && (
+                <div style={{ marginBottom: 10 }}>
+                  {(diag.diffs ?? []).map((d: any, i: number) => (
+                    <div key={i} style={{ marginBottom: 8 }}>
+                      <Space size={8}>
+                        <Mono>{d.path}</Mono>
+                        <Tag color={d.rolledBack ? 'orange' : d.applied ? 'green' : 'default'}>
+                          {d.rolledBack ? '已回滚' : d.applied ? '已写入' : '未写入'}
+                        </Tag>
+                      </Space>
+                      <pre className="dp-mono" style={{ maxHeight: 220, overflow: 'auto', margin: '6px 0 0', background: '#fff', border: '1px solid #F0F1F3', borderRadius: 6, padding: 8 }}>
+                        {String(d.diff ?? '').split('\n').map((line: string, li: number) => (
+                          <div key={li} style={diffLineStyle(line)}>{line || ' '}</div>
+                        ))}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(diag.verifyAttempts ?? []).length > 0 && (
+                <Space direction="vertical" size={2} style={{ marginBottom: 8 }}>
+                  {(diag.verifyAttempts ?? []).map((v: any, i: number) => (
+                    <span key={i} style={{ fontSize: 12 }}>
+                      验证 <Mono>{v.command}</Mono> → {v.timedOut ? <span style={{ color: '#B45309' }}>超时</span> : v.exitCode === 0 ? <span style={{ color: '#15803D' }}>通过（exit 0）</span> : <span style={{ color: '#B42318' }}>失败（exit {v.exitCode}）</span>}
+                    </span>
+                  ))}
+                </Space>
+              )}
+              {diag.report && <div style={{ whiteSpace: 'pre-wrap', fontSize: 13, marginBottom: 8 }}>{diag.report}</div>}
+              <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }} copyable={{ text: JSON.stringify(diag, null, 2) }}>
+                复制原始响应
+              </Typography.Paragraph>
+            </div>
+          )}
         </Space>
-      </Card>
-      <Card size="small" title="日志检索">
-        <Space style={{ marginBottom: 8 }}>
+      </SectionCard>
+
+      <SectionCard title={`日志检索${rows.length ? `（${rows.length}）` : ''}`}>
+        <Space wrap style={{ marginBottom: 8 }}>
           <Select allowClear placeholder="级别" style={{ width: 140 }} value={level} onChange={setLevel}
             options={['trace', 'debug', 'info', 'warn', 'error', 'fatal'].map((v) => ({ value: v, label: v }))} />
-          <Input placeholder="来源模块" style={{ width: 220 }} value={source} onChange={(e) => setSource(e.target.value || undefined)} />
+          <Input placeholder="来源模块，例如 workflow" style={{ width: 220 }} value={source} onChange={(e) => setSource(e.target.value || undefined)} />
           <Button onClick={() => void load()}>查询</Button>
         </Space>
-        <Table rowKey="id" size="small" dataSource={rows} pagination={{ pageSize: 10 }} scroll={{ x: 760 }}
-          columns={[
-            { title: '时间', dataIndex: 'created_at', width: 120, render: (v: string) => <Mono title={v}>{formatTime(v)}</Mono> },
-            { title: '级别', dataIndex: 'level', width: 80, render: (l) => <Tag color={l === 'error' || l === 'fatal' ? 'red' : l === 'warn' ? 'orange' : 'default'}>{l}</Tag> },
-            { title: '来源', dataIndex: 'source_module', width: 200, ellipsis: true },
-            { title: '日志文件', dataIndex: 'body_ref', ellipsis: true, render: (v: string) => <Mono title={v}>{v}</Mono> },
-          ]} />
-      </Card>
-    </Space>
+        <StateBlock loading={loading} error={error} onRetry={() => void load()} empty={rows.length === 0} emptyText="当前筛选条件下没有日志">
+          <Table rowKey="id" size="small" dataSource={rows} pagination={{ pageSize: 12 }} scroll={{ x: 760 }}
+            columns={[
+              { title: '时间', dataIndex: 'created_at', width: 120, render: (v: string) => <Mono title={v}>{formatTime(v)}</Mono> },
+              { title: '级别', dataIndex: 'level', width: 80, render: (l) => <Tag color={l === 'error' || l === 'fatal' ? 'red' : l === 'warn' ? 'orange' : 'default'}>{l}</Tag> },
+              { title: '来源', dataIndex: 'source_module', width: 200, ellipsis: true },
+              { title: '日志文件', dataIndex: 'body_ref', ellipsis: true, render: (v: string) => <Mono title={v}>{v}</Mono> },
+            ]} />
+        </StateBlock>
+      </SectionCard>
+    </div>
   );
 }
 
@@ -297,17 +467,35 @@ function Settings({ rerunOnboarding }: { rerunOnboarding: () => void }) {
   const load = React.useCallback(async () => setSt(await api('/models/status')), []);
   useEffect(() => { void load(); }, [load]);
 
+  const [saving, setSaving] = useState(false);
+  const [switching, setSwitching] = useState<string | null>(null);
+
   const save = async () => {
-    if (!key.trim()) return;
-    await api('/models/config', 'POST', { provider, apiKey: key, model: model || undefined, baseUrl: baseUrl || undefined });
-    message.success(`API Key 已保存（${provider}）`);
-    setKey('');
-    void load();
+    if (!key.trim() || saving) return;
+    setSaving(true);
+    try {
+      await api('/models/config', 'POST', { provider, apiKey: key, model: model || undefined, baseUrl: baseUrl || undefined });
+      message.success(`API Key 已保存（${provider}）`);
+      setKey('');
+      await load();
+    } catch (e: any) {
+      message.error('保存失败：' + (e?.message ?? String(e)));
+    } finally {
+      setSaving(false);
+    }
   };
   const switchTo = async (p: string) => {
-    const r = await api<{ provider: string; keyConfigured: boolean }>('/models/switch', 'POST', { provider: p });
-    r.keyConfigured ? message.success(`已切换到 ${p}`) : message.warning(`已切换到 ${p}，但该供应商尚未配置 Key`);
-    void load();
+    if (switching) return;
+    setSwitching(p);
+    try {
+      const r = await api<{ provider: string; keyConfigured: boolean }>('/models/switch', 'POST', { provider: p });
+      r.keyConfigured ? message.success(`已切换到 ${p}`) : message.warning(`已切换到 ${p}，但该供应商尚未配置 Key`);
+      await load();
+    } catch (e: any) {
+      message.error('切换失败：' + (e?.message ?? String(e)));
+    } finally {
+      setSwitching(null);
+    }
   };
 
   const current = st?.providers?.find((p: any) => p.active);
@@ -315,7 +503,9 @@ function Settings({ rerunOnboarding }: { rerunOnboarding: () => void }) {
     <Space direction="vertical" style={{ width: '100%' }}>
       <Card size="small" title="模型供应商">
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
-          全部走 OpenAI 兼容协议。Key 存入 Windows 凭据管理器（降级为本地加密文件）。当前激活：<Tag color="blue">{current?.label ?? st?.provider}</Tag>
+          全部走 OpenAI 兼容协议。Key 保存在 Windows 凭据管理器（不可用时降级为本地加密文件），
+          界面与日志只显示「已配置 / 未配置」，不回显明文；需要删除或轮换时可在系统「凭据管理器」中操作，或在此重新保存覆盖。
+          当前激活：<Tag color="blue">{current?.label ?? st?.provider}</Tag>
           {current && <Typography.Text type="secondary">模型 {current.defaultModel}{current.keyConfigured ? '' : ' · 未配置 Key'}</Typography.Text>}
         </Typography.Paragraph>
         <Table rowKey="id" size="small" pagination={false} dataSource={st?.providers ?? []}
@@ -326,7 +516,7 @@ function Settings({ rerunOnboarding }: { rerunOnboarding: () => void }) {
             { title: 'Key', dataIndex: 'keyConfigured', render: (v) => <Tag color={v ? 'green' : 'default'}>{v ? '已配置' : '未配置'}</Tag> },
             { title: '操作', render: (_, p: any) => p.active
               ? <Tag color="blue">使用中</Tag>
-              : <Button size="small" onClick={() => switchTo(p.id)}>切换</Button> },
+              : <Button size="small" loading={switching === p.id} onClick={() => switchTo(p.id)}>切换</Button> },
           ]} />
         <div style={{ marginTop: 12 }}>
           <Space wrap>
@@ -335,7 +525,7 @@ function Settings({ rerunOnboarding }: { rerunOnboarding: () => void }) {
             <Input.Password placeholder="API Key（sk-...）" style={{ width: 260 }} value={key} onChange={(e) => setKey(e.target.value)} />
             <Input placeholder="覆盖默认模型（可选）" style={{ width: 200 }} value={model} onChange={(e) => setModel(e.target.value)} />
             <Input placeholder="覆盖 Base URL（可选，custom 必填）" style={{ width: 280 }} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-            <Button type="primary" onClick={save}>保存 Key</Button>
+            <Button type="primary" loading={saving} disabled={!key.trim()} onClick={save}>保存 Key</Button>
           </Space>
         </div>
       </Card>
@@ -570,7 +760,7 @@ function DatabasesCenter() {
               title: '操作', render: (_, r) => (
                 <Space>
                   <Button size="small" onClick={() => void testConn(r.id)}>测试</Button>
-                  <Button size="small" danger onClick={async () => { await api(`/databases/connections/${r.id}`, 'DELETE'); void load(); }}>删除</Button>
+                  <Button size="small" danger onClick={() => confirmDelete('删除这条数据库连接？', '只移除 DevPilot 中的连接配置，不会删除远端数据库或其中的数据。', async () => { await api(`/databases/connections/${r.id}`, 'DELETE'); await load(); })}>删除</Button>
                 </Space>
               ),
             },
@@ -597,7 +787,7 @@ function DatabasesCenter() {
                   <Button size="small" type="primary" onClick={async () => { const x = await api<any>(`/local-services/${r.id}/start`, 'POST'); x.ok ? message.success(`已启动 pid=${x.pid}`) : message.error(x.error); void load(); }}>启动</Button>
                   <Button size="small" onClick={async () => { await api(`/local-services/${r.id}/check`, 'POST'); void load(); }}>检查</Button>
                   <Button size="small" danger onClick={async () => { await api(`/local-services/${r.id}/stop`, 'POST'); void load(); }}>停止</Button>
-                  <Button size="small" danger onClick={async () => { await api(`/local-services/${r.id}`, 'DELETE'); void load(); }}>删除</Button>
+                  <Button size="small" danger onClick={() => confirmDelete('删除这个本地服务？', '会移除服务定义与启动配置。若进程仍在运行，请先停止再删除。', async () => { await api(`/local-services/${r.id}`, 'DELETE'); await load(); })}>删除</Button>
                 </Space>
               ),
             },
@@ -731,7 +921,7 @@ function CommandActionsCard({ tools }: { tools: any[] }) {
             { title: '操作', width: 130, render: (_, r) => (
               <Space>
                 <Button size="small" type="primary" onClick={() => void run(r.id)}>执行</Button>
-                <Button size="small" danger onClick={async () => { await api(`/external-tools/${toolId}/actions/${r.id}`, 'DELETE'); void load(); }}>删除</Button>
+                <Button size="small" danger onClick={() => confirmDelete('删除这条工具动作？', '只移除这条快捷动作配置，不影响外部工具本身。', async () => { await api(`/external-tools/${toolId}/actions/${r.id}`, 'DELETE'); await load(); })}>删除</Button>
               </Space>
             ) },
           ]} />
@@ -802,7 +992,7 @@ function ConfigCenterPage() {
               title: '操作', render: (_, r) => (
                 <Space>
                   <Button size="small" type="primary" disabled={r.active} onClick={() => void activate(r.id)}>激活（写入服务 env）</Button>
-                  <Button size="small" danger onClick={async () => { await api(`/config-center/profiles/${r.id}`, 'DELETE'); void load(); }}>删除</Button>
+                  <Button size="small" danger onClick={() => confirmDelete('删除这个配置档案？', '该档案下的覆盖值会一并删除，相关项目将回落到默认配置。', async () => { await api(`/config-center/profiles/${r.id}`, 'DELETE'); await load(); })}>删除</Button>
                 </Space>
               ),
             },
@@ -822,71 +1012,121 @@ function BackupCenterPage() {
   const [rows, setRows] = useState<any[]>([]);
   const [projects, setProjects] = useState<any[]>([]);
   const [bundlePath, setBundlePath] = useState('');
+  const [pending, setPending] = useState<Record<string, boolean>>({});
+  const busy = (k: string) => !!pending[k];
+  const mark = (k: string, v: boolean) => setPending((p) => ({ ...p, [k]: v }));
 
   const load = React.useCallback(async () => {
-    setRows(await api('/backups'));
-    setProjects(await api('/projects'));
+    try {
+      setRows(await api('/backups'));
+      setProjects(await api('/projects'));
+    } catch (e: any) { message.error(e?.message ?? String(e)); }
   }, []);
   useEffect(() => { void load(); }, [load]);
 
   const create = async () => {
-    const r = await api<any>('/backups', 'POST', {});
-    message.success(`备份完成 ${(r.size / 1024).toFixed(0)} KB`);
-    void load();
+    if (busy('create')) return;
+    mark('create', true);
+    try {
+      const r = await api<any>('/backups', 'POST', {});
+      message.success(`备份完成 ${(r.size / 1024).toFixed(0)} KB，已通过 SHA256 记录`);
+      await load();
+    } catch (e: any) { message.error('备份失败：' + (e?.message ?? String(e))); } finally { mark('create', false); }
   };
+
   const verify = async (id: string) => {
-    const r = await api<{ ok: boolean; error?: string }>(`/backups/${id}/verify`, 'POST');
-    r.ok ? message.success('校验通过') : message.error(r.error ?? '校验失败');
-    void load();
+    if (busy(`verify-${id}`)) return;
+    mark(`verify-${id}`, true);
+    try {
+      const r = await api<{ ok: boolean; error?: string }>(`/backups/${id}/verify`, 'POST');
+      r.ok ? message.success('校验通过，备份文件未被篡改') : message.error(r.error ?? '校验失败');
+      await load();
+    } catch (e: any) { message.error('校验失败：' + (e?.message ?? String(e))); } finally { mark(`verify-${id}`, false); }
   };
-  const restore = async (id: string) => {
-    const r = await api<any>(`/backups/${id}/restore`, 'POST');
-    r.ok ? message.warning(r.message) : message.error(r.error);
+
+  const restore = (id: string, createdAt: string) => {
+    Modal.confirm({
+      title: '用这个备份覆盖当前数据？',
+      content: (
+        <div>
+          <p>当前数据库会被 <strong>{createdAt}</strong> 的快照整体替换，替换后需要重启应用生效。</p>
+          <p style={{ color: '#B45309' }}>这份备份之后产生的项目、任务与配置改动都会丢失。建议先点「立即备份」留存当前状态。</p>
+        </div>
+      ),
+      okText: '覆盖并恢复',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        const r = await api<any>(`/backups/${id}/restore`, 'POST');
+        r.ok ? message.warning(r.message ?? '恢复完成，重启应用后生效') : message.error(r.error ?? '恢复失败');
+        await load();
+      },
+    });
   };
+
   const exportProject = async (projectId: string) => {
-    const r = await api<any>('/backups/export-project', 'POST', { projectId });
-    message.success(`导出完成（${r.counts.services} 服务 / ${r.counts.profiles} 档案）→ ${r.file}`);
-    setBundlePath(r.file);
+    try {
+      const r = await api<any>('/backups/export-project', 'POST', { projectId });
+      message.success(`导出完成：${r.counts.services} 个服务 / ${r.counts.profiles} 份档案`);
+      setBundlePath(r.file);
+    } catch (e: any) { message.error('导出失败：' + (e?.message ?? String(e))); }
   };
+
   const importProject = async () => {
-    if (!bundlePath.trim()) return message.warning('填写导出包路径');
-    const r = await api<any>('/backups/import-project', 'POST', { bundlePath });
-    r.ok ? message.success(`导入完成${r.skipped ? '（项目已存在，增量恢复）' : ''}：+${r.created.services} 服务 +${r.created.profiles} 档案`) : message.error(r.error);
-    void load();
+    if (!bundlePath.trim()) { message.warning('先填写或选择导出包路径'); return; }
+    if (busy('import')) return;
+    mark('import', true);
+    try {
+      const r = await api<any>('/backups/import-project', 'POST', { bundlePath });
+      r.ok
+        ? message.success(`导入完成${r.skipped ? '（项目已存在，按增量恢复）' : ''}：+${r.created.services} 服务 / +${r.created.profiles} 档案`)
+        : message.error(r.error ?? '导入失败');
+      await load();
+    } catch (e: any) { message.error('导入失败：' + (e?.message ?? String(e))); } finally { mark('import', false); }
   };
 
   return (
-    <Space direction="vertical" style={{ width: '100%' }}>
-      <Card size="small" title="全量备份（SQLite 快照 + SHA256）">
-        <Button type="primary" onClick={create}>立即备份</Button>
-        <Table rowKey="id" size="small" style={{ marginTop: 8 }} dataSource={rows} pagination={false}
+    <div>
+      <SectionCard
+        title="全量备份"
+        extra={<Button size="small" type="primary" loading={busy('create')} onClick={() => void create()}>立即备份</Button>}
+        style={{ marginBottom: 16 }}
+      >
+        <p className="dp-desc" style={{ marginTop: 0, marginBottom: 8 }}>备份包含 SQLite 快照与 SHA256 校验值，恢复会整体覆盖当前数据。</p>
+        <Table rowKey="id" size="small" dataSource={rows} pagination={false}
           columns={[
-            { title: '时间', dataIndex: 'created_at', width: 200 },
-            { title: '类型', dataIndex: 'backup_type' },
-            { title: '数据版本', dataIndex: 'data_version' },
-            { title: '大小', dataIndex: 'size_bytes', render: (v) => `${(v / 1024).toFixed(0)} KB` },
-            { title: '校验', dataIndex: 'verify_status', render: (s) => <Tag color={s === 'verified' ? 'green' : s === 'unverified' ? 'default' : 'red'}>{s}</Tag> },
+            { title: '时间', dataIndex: 'created_at', width: 180, render: (v: string) => <Mono>{formatTime(v)}</Mono> },
+            { title: '类型', dataIndex: 'backup_type', width: 100 },
+            { title: '数据版本', dataIndex: 'data_version', width: 100 },
+            { title: '大小', dataIndex: 'size_bytes', width: 100, render: (v) => `${(v / 1024).toFixed(0)} KB` },
+            { title: '校验', dataIndex: 'verify_status', width: 100, render: (s) => <Tag color={s === 'verified' ? 'green' : s === 'unverified' ? 'default' : 'red'}>{s === 'verified' ? '已校验' : s === 'unverified' ? '未校验' : '校验失败'}</Tag> },
             {
-              title: '操作', render: (_, r) => (
-                <Space>
-                  <Button size="small" onClick={() => void verify(r.id)}>校验</Button>
-                  <Button size="small" danger onClick={() => void restore(r.id)}>恢复（重启生效）</Button>
+              title: '操作', width: 190, render: (_, r) => (
+                <Space size={4}>
+                  <Button size="small" loading={busy(`verify-${r.id}`)} onClick={() => void verify(r.id)}>校验</Button>
+                  <Button size="small" danger onClick={() => restore(r.id, r.created_at)}>从此备份恢复</Button>
                 </Space>
               ),
             },
           ]} />
-      </Card>
-      <Card size="small" title="项目导出 / 导入（跨机器迁移）">
-        <Space wrap style={{ marginBottom: 8 }}>
-          <Select placeholder="选择项目" style={{ width: 280 }} onChange={(v) => void exportProject(v)}
-            options={projects.map((p) => ({ value: p.id, label: p.name }))} />
+      </SectionCard>
+
+      <SectionCard title="项目导出与导入（跨机器迁移）">
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Space wrap>
+            <Select placeholder="选择要导出的项目" style={{ width: 280 }}
+              options={projects.map((p) => ({ value: p.id, label: p.name }))}
+              onChange={(v) => void exportProject(v)} />
+            <span className="dp-desc">导出后下方会自动填入文件路径，可直接拷到另一台机器导入。</span>
+          </Space>
+          <Space.Compact style={{ width: '100%' }}>
+            <Input placeholder="导出包 JSON 路径" value={bundlePath} onChange={(e) => setBundlePath(e.target.value)} />
+            <Button type="primary" loading={busy('import')} onClick={() => void importProject()}>导入</Button>
+          </Space.Compact>
+          <span className="dp-desc">项目已存在时按增量恢复，不会覆盖已有服务与档案。</span>
         </Space>
-        <Space.Compact style={{ width: '80%' }}>
-          <Input placeholder="导出包 JSON 路径" value={bundlePath} onChange={(e) => setBundlePath(e.target.value)} />
-          <Button type="primary" onClick={importProject}>导入</Button>
-        </Space.Compact>
-      </Card>
-    </Space>
+      </SectionCard>
+    </div>
   );
 }
 
@@ -960,7 +1200,7 @@ function NotificationCenterPage() {
             { title: '操作', render: (_, r) => (
               <Space>
                 <Button size="small" onClick={async () => { await api(`/notifications/rules/${r.id}/update`, 'POST', { enabled: !r.enabled }); void load(); }}>{r.enabled ? '停用' : '启用'}</Button>
-                <Button size="small" danger onClick={async () => { await api(`/notifications/rules/${r.id}`, 'DELETE'); void load(); }}>删除</Button>
+                <Button size="small" danger onClick={() => confirmDelete('删除这条订阅规则？', '删除后该类事件不再按此规则推送。', async () => { await api(`/notifications/rules/${r.id}`, 'DELETE'); await load(); })}>删除</Button>
               </Space>
             ) },
           ]} />
@@ -1404,7 +1644,7 @@ function WorkflowsPage() {
                 <Button size="small" onClick={async () => { const full = await api<any>(`/workflows/${w.id}`); setDetail({ ...w, definition: (full as any).definition }); }}>定义</Button>
                 <Button size="small" onClick={() => void showRuns(w)}>历史</Button>
                 <Button size="small" onClick={async () => { await api(`/workflows/${w.id}/${w.enabled ? 'disable' : 'enable'}`, 'POST'); void load(); }}>{w.enabled ? '停用' : '启用'}</Button>
-                <Button size="small" danger onClick={async () => { await api(`/workflows/${w.id}`, 'DELETE'); void load(); }}>删除</Button>
+                <Button size="small" danger onClick={() => confirmDelete(`删除工作流「${w.name}」？`, '会删除工作流定义与触发器，正在运行的实例不受影响，但此后不再从这里启动或查看。', async () => { await api(`/workflows/${w.id}`, 'DELETE'); await load(); })}>删除</Button>
               </Space>
             ) },
           ]} />

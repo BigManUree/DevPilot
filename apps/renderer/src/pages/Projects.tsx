@@ -143,6 +143,14 @@ export default function Projects({ selectedId, onSelect }: { selectedId: string 
           columns={[
             { title: '名称', dataIndex: 'name', render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
             { title: '技术栈', render: (_, r) => [r.language, r.framework].filter(Boolean).join(' / ') || <span style={{ color: '#98A2B3' }}>未识别</span> },
+            {
+              title: '服务', width: 110, render: (_, r) => (
+                <span style={{ fontSize: 12 }}>
+                  {r.service_count ?? 0}
+                  {(r.running_count ?? 0) > 0 && <span style={{ color: '#15803D' }}> / {r.running_count} 运行</span>}
+                </span>
+              ),
+            },
             { title: '配置状态', dataIndex: 'analysis_status', width: 120, render: (s: string) => <StatusTag status={s === 'confirmed' ? 'Completed' : 'Pending'} text={s === 'confirmed' ? '已确认' : '待确认'} /> },
             { title: '根目录', dataIndex: 'root_path', ellipsis: true, render: (v: string) => <Mono title={v}>{v}</Mono> },
             {

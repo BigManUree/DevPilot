@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Breadcrumb, Layout, Menu } from 'antd';
+import { Breadcrumb, Layout, Menu, Tooltip } from 'antd';
 import { api } from '../api';
 
 export interface NavPage { key: string; label: string; group: string; desc: string }
@@ -29,9 +29,35 @@ export const PAGES: NavPage[] = [
 ];
 
 const GROUPS = ['工作区', '开发', '自动化', '资源与工具'];
+const COLLAPSE_KEY = 'devpilot.siderCollapsed';
 
-function backendStatus(): { ok: boolean | null; text: string } {
-  return { ok: null, text: '检测中' };
+/** 折叠态紧凑导航：两字缩写 + tooltip，键盘可聚焦 */
+function CompactNav({ page, onNavigate }: { page: string; onNavigate: (k: string) => void }) {
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '8px 8px' }}>
+      {PAGES.map((p) => {
+        const active = p.key === page;
+        return (
+          <Tooltip key={p.key} title={`${p.group} / ${p.label}`} placement="right">
+            <button
+              type="button"
+              aria-label={p.label}
+              aria-current={active ? 'page' : undefined}
+              onClick={() => onNavigate(p.key)}
+              style={{
+                width: '100%', height: 34, marginBottom: 2, border: 'none', cursor: 'pointer',
+                borderRadius: 6, background: active ? '#EFF4FF' : 'transparent',
+                color: active ? '#2563EB' : '#667085', fontWeight: active ? 600 : 400,
+                fontSize: 12, boxShadow: active ? 'inset 2px 0 0 #2563EB' : undefined,
+              }}
+            >
+              {p.label.slice(0, 2)}
+            </button>
+          </Tooltip>
+        );
+      })}
+    </div>
+  );
 }
 
 export default function Shell({ page, onNavigate, children }: {
@@ -39,6 +65,15 @@ export default function Shell({ page, onNavigate, children }: {
 }) {
   const current = PAGES.find((p) => p.key === page) ?? PAGES[0];
   const [health, setHealth] = useState<{ ok: boolean | null }>({ ok: null });
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem(COLLAPSE_KEY) === '1'; } catch { return false; }
+  });
+
+  const toggle = () => setCollapsed((c) => {
+    const next = !c;
+    try { localStorage.setItem(COLLAPSE_KEY, next ? '1' : '0'); } catch { /* 忽略 */ }
+    return next;
+  });
 
   useEffect(() => {
     let alive = true;
@@ -55,45 +90,81 @@ export default function Shell({ page, onNavigate, children }: {
     return () => { alive = false; clearInterval(t); };
   }, []);
 
-  const menuItems = [
-    ...GROUPS.map((g) => ({
-      type: 'group' as const,
-      key: g,
-      label: g,
-      children: PAGES.filter((p) => p.group === g).map((p) => ({ key: p.key, label: p.label })),
-    })),
-  ];
+  const menuItems = GROUPS.map((g) => ({
+    type: 'group' as const,
+    key: g,
+    label: g,
+    children: PAGES.filter((p) => p.group === g).map((p) => ({ key: p.key, label: p.label })),
+  }));
 
   return (
     <Layout style={{ height: '100vh' }}>
-      <Layout.Sider width={216} className="dp-sider" theme="light">
-        <div className="dp-brand"><span className="dp-brand-badge">D</span>DevPilot</div>
-        <Menu
-          mode="inline"
-          items={menuItems}
-          selectedKeys={[page]}
-          onClick={(e) => onNavigate(e.key)}
-          style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}
-        />
-        <div className="dp-sider-footer">
+      <Layout.Sider width={216} collapsedWidth={64} collapsed={collapsed} className="dp-sider" theme="light" trigger={null}>
+        <div className="dp-brand" style={{ justifyContent: collapsed ? 'center' : 'flex-start', padding: collapsed ? '14px 0 10px' : undefined }}>
+          <span className="dp-brand-badge">D</span>
+          {!collapsed && <>DevPilot</>}
+        </div>
+
+        {collapsed ? (
+          <CompactNav page={page} onNavigate={onNavigate} />
+        ) : (
           <Menu
             mode="inline"
-            items={[{ key: '9', label: '设置' }]}
-            selectedKeys={page === '9' ? ['9'] : []}
+            items={menuItems}
+            selectedKeys={[page]}
             onClick={(e) => onNavigate(e.key)}
+            style={{ flex: 1, overflowY: 'auto' }}
           />
-          <div className="dp-backend" title={health.ok ? '后端连接正常' : '后端不可达，请检查进程'}>
+        )}
+
+        <div className="dp-sider-footer" style={{ padding: collapsed ? '8px 8px 10px' : undefined }}>
+          {collapsed ? (
+            <Tooltip title="设置" placement="right">
+              <button
+                type="button" aria-label="设置" onClick={() => onNavigate('9')}
+                style={{
+                  width: '100%', height: 32, border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12,
+                  background: page === '9' ? '#EFF4FF' : 'transparent', color: page === '9' ? '#2563EB' : '#667085',
+                }}
+              >设</button>
+            </Tooltip>
+          ) : (
+            <Menu
+              mode="inline"
+              items={[{ key: '9', label: '设置' }]}
+              selectedKeys={page === '9' ? ['9'] : []}
+              onClick={(e) => onNavigate(e.key)}
+            />
+          )}
+          <div className="dp-backend" style={{ justifyContent: collapsed ? 'center' : 'flex-start' }} title={health.ok ? '后端连接正常' : '后端不可达，请检查进程'}>
             <span className={`dp-dot ${health.ok === null ? '' : health.ok ? 'ok' : 'bad'}`} />
-            127.0.0.1:37100 · {health.ok === null ? backendStatus().text : health.ok ? '已连接' : '未连接'}
+            {!collapsed && <>后端{health.ok === null ? '检测中' : health.ok ? '已连接' : '未连接'}</>}
           </div>
         </div>
       </Layout.Sider>
+
       <Layout>
         <div className="dp-header">
-          <Breadcrumb items={current.group === current.label ? [{ title: current.label }] : [{ title: current.group }, { title: current.label }]} />
-          <span style={{ fontSize: 12, color: '#98A2B3' }}>
-            {health.ok === false ? '后端未连接，操作可能失败' : ''}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+            <button
+              type="button"
+              onClick={toggle}
+              aria-label={collapsed ? '展开侧栏' : '折叠侧栏'}
+              aria-expanded={!collapsed}
+              title={collapsed ? '展开侧栏' : '折叠侧栏'}
+              style={{
+                width: 26, height: 26, border: '1px solid #E4E7EC', borderRadius: 6, background: '#fff',
+                cursor: 'pointer', color: '#667085', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+                <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                <line x1="6.5" y1="2.5" x2="6.5" y2="13.5" stroke="currentColor" strokeWidth="1.2" />
+              </svg>
+            </button>
+            <Breadcrumb items={[{ title: current.group }, { title: current.label }]} />
+          </div>
+          <span style={{ fontSize: 12, color: '#98A2B3', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{current.desc}</span>
         </div>
         <Layout.Content className="dp-content">
           <div className="dp-page">{children}</div>

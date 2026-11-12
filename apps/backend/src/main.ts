@@ -10,7 +10,8 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const port = Number(process.env.DEVIPILOT_BACKEND_PORT ?? 37100);
   const app = await NestFactory.create(AppModule, { logger: ['log', 'warn', 'error'] });
-  app.enableCors({ origin: ['http://localhost:5173', 'file://'] });
+  // 开发期 CORS：vite dev(5173) / vite preview(4173) / Electron file://
+  app.enableCors({ origin: ['http://localhost:5173', 'http://127.0.0.1:4173', 'file://'] });
   app.useWebSocketAdapter(new WsAdapter(app));
   await app.listen(port, '127.0.0.1');
   // eslint-disable-next-line no-console

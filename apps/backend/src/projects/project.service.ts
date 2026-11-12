@@ -145,7 +145,14 @@ export class ProjectService {
   }
 
   list() {
-    return this.ds.db.prepare('SELECT * FROM projects ORDER BY created_at DESC').all();
+    // 列表附带服务数 / 运行中服务数，避免前端逐项目拉详情
+    return this.ds.db.prepare(`
+      SELECT p.*,
+        (SELECT COUNT(*) FROM project_services s WHERE s.project_id = p.id) AS service_count,
+        (SELECT COUNT(*) FROM project_services s WHERE s.project_id = p.id AND s.status = 'Running') AS running_count
+      FROM projects p
+      ORDER BY p.created_at DESC
+    `).all();
   }
 
   get(projectId: string) {
