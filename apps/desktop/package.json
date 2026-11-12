@@ -12,7 +12,8 @@
     "dev": "npm run build && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
     "start": "electron .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "pack": "pnpm run build && node ../../scripts/prepare-backend.js && electron-builder --win"
+    "pack": "pnpm run build && node ../../scripts/prepare-backend.js && electron-builder --win",
+    "pack:signed": "cross-env CSC_LINK=certs/devpilot-dev.pfx CSC_KEY_PASSWORD=devpilot-dev electron-builder --win"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -50,7 +51,11 @@
           ]
         }
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "signingHashAlgorithms": [
+        "sha256"
+      ],
+      "rfc3161TimeStampServer": "http://timestamp.digicert.com"
     },
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"

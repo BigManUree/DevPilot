@@ -38,3 +38,6 @@ apps/desktop/build/*
 
 # UI 自审截图产物
 apps/renderer/shots/
+
+# 代码签名证书（本地私钥，禁止入库）
+apps/desktop/certs/
