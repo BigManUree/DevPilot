@@ -35,7 +35,7 @@ const COLLAPSE_KEY = 'devpilot.siderCollapsed';
 /** 折叠态紧凑导航：两字缩写 + tooltip，键盘可聚焦 */
 function CompactNav({ page, onNavigate }: { page: string; onNavigate: (k: string) => void }) {
   return (
-    <div style={{ flex: 1, overflowY: 'auto', padding: '8px 8px' }}>
+    <div className="dp-compact-nav" style={{ padding: "8px 8px" }}>
       {PAGES.map((p) => {
         const active = p.key === page;
         return (
@@ -127,7 +127,7 @@ export default function Shell({ page, onNavigate, children, themeMode, onThemeCh
   }));
 
   return (
-    <Layout style={{ height: '100vh' }}>
+    <Layout className="dp-shell">
       <Layout.Sider width={216} collapsedWidth={64} collapsed={collapsed} className="dp-sider" theme="light" trigger={null}>
         <div className={`dp-brand${collapsed ? ' collapsed' : ''}`}>{collapsed ? 'DP' : 'DevPilot'}</div>
 
@@ -139,7 +139,7 @@ export default function Shell({ page, onNavigate, children, themeMode, onThemeCh
             items={menuItems}
             selectedKeys={[page]}
             onClick={(e) => onNavigate(e.key)}
-            style={{ flex: 1, overflowY: 'auto' }}
+            style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto' }}
           />
         )}
 
@@ -170,7 +170,7 @@ export default function Shell({ page, onNavigate, children, themeMode, onThemeCh
         </div>
       </Layout.Sider>
 
-      <Layout>
+      <Layout className="dp-main">
         <div className="dp-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
             <button
