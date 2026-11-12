@@ -25,7 +25,7 @@
     "appId": "com.devpilot.desktop",
     "productName": "DevPilot",
     "directories": {
-      "output": "release9"
+      "output": "release10"
     },
     "files": [
       "dist/**/*",
