@@ -143,6 +143,14 @@ body { background: var(--dp-bg); color: var(--dp-text); overflow: hidden; }
 }
 .dp-icon-btn:hover { background: var(--dp-hover); color: var(--dp-text); }
 
+/* 引导页：脱离 Shell 的独立全屏页，自己负责滚动（整窗已禁止滚动） */
+.dp-wizard-scroll {
+  height: 100vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 40px 24px 48px;
+}
+
 /* 内容画布 */
 .dp-content {
   flex: 1 1 auto;

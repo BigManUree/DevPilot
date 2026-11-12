@@ -1262,7 +1262,8 @@ function FirstRunWizard({ onFinish }: { onFinish: () => void }) {
   const canNext = step !== 1 || !!modelSt?.keyConfigured;
 
   return (
-    <div style={{ maxWidth: 720, margin: '60px auto', padding: 24 }}>
+    <div className="dp-wizard-scroll">
+      <div style={{ maxWidth: 720, margin: '0 auto' }}>
       <Card>
         <Typography.Title level={3} style={{ marginTop: 0 }}>欢迎使用 DevPilot</Typography.Title>
         <Typography.Paragraph type="secondary">首次启动引导将带你完成 5 步初始化配置。</Typography.Paragraph>
@@ -1329,6 +1330,7 @@ function FirstRunWizard({ onFinish }: { onFinish: () => void }) {
         </div>
       </Card>
     </div>
+      </div>
   );
 }
 
