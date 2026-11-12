@@ -142,12 +142,12 @@ export default function Projects({ selectedId, onSelect }: { selectedId: string 
           onRow={(r) => ({ onClick: () => void openDetail(r.id), style: { cursor: 'pointer' } })}
           columns={[
             { title: '名称', dataIndex: 'name', render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
-            { title: '技术栈', render: (_, r) => [r.language, r.framework].filter(Boolean).join(' / ') || <span style={{ color: '#98A2B3' }}>未识别</span> },
+            { title: '技术栈', render: (_, r) => [r.language, r.framework].filter(Boolean).join(' / ') || <span style={{ color: 'var(--dp-text-3)' }}>未识别</span> },
             {
               title: '服务', width: 110, render: (_, r) => (
                 <span style={{ fontSize: 12 }}>
                   {r.service_count ?? 0}
-                  {(r.running_count ?? 0) > 0 && <span style={{ color: '#15803D' }}> / {r.running_count} 运行</span>}
+                  {(r.running_count ?? 0) > 0 && <span style={{ color: 'var(--dp-success)' }}> / {r.running_count} 运行</span>}
                 </span>
               ),
             },

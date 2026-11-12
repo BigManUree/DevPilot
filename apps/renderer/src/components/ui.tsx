@@ -1,6 +1,6 @@
 import React from 'react';
 import { Card, Tag, Typography, Spin, Button } from 'antd';
-import { colors, monoFont } from '../theme';
+import { monoFont } from '../theme';
 
 /** 状态色统一映射（服务 / 任务 / 工作流共用） */
 export const statusColor: Record<string, string> = {
@@ -58,15 +58,15 @@ export function StateBlock({ loading, error, empty, emptyText, onRetry, children
   if (error) {
     return (
       <div style={{ padding: '16px 14px', background: '#FEF3F2', border: '1px solid #FECDCA', borderRadius: 8 }}>
-        <div style={{ fontSize: 13, fontWeight: 500, color: colors.danger }}>加载失败</div>
-        <div style={{ fontSize: 12, color: colors.textSecondary, marginTop: 4 }}>{error}</div>
+        <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--dp-danger)' }}>加载失败</div>
+        <div style={{ fontSize: 12, color: 'var(--dp-text-2)', marginTop: 4 }}>{error}</div>
         {onRetry && <Button size="small" style={{ marginTop: 10 }} onClick={onRetry}>重试</Button>}
       </div>
     );
   }
   if (empty) {
     return (
-      <div style={{ padding: '24px 0', textAlign: 'center', color: colors.textTertiary, fontSize: 13 }}>
+      <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--dp-text-3)', fontSize: 13 }}>
         {emptyText ?? '暂无数据'}
       </div>
     );

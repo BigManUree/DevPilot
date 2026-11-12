@@ -1,6 +1,7 @@
 import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import path from 'node:path';
 import { BackendManager } from './backend-manager';
+import { installAppMenu } from './app-menu';
 
 /**
  * Electron 主进程：窗口生命周期、后端拉起与退出清理。
@@ -40,6 +41,8 @@ function createWindow(backendUrl: string) {
 
 app.whenReady().then(async () => {
   ipcMain.handle('devpilot:getBackendUrl', () => backend.url);
+  // 原生菜单栏：动作经 IPC 交给渲染进程（业务逻辑仍在前端）
+  installAppMenu(() => BrowserWindow.getAllWindows()[0] ?? null);
   try {
     const backendUrl = await backend.ensure();
     createWindow(backendUrl);

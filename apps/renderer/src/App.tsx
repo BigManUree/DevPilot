@@ -7,7 +7,8 @@ import zhCN from 'antd/locale/zh_CN';
 import { api, wsUrl } from './api';
 import '@xterm/xterm/css/xterm.css';
 import MonacoEditor from '@monaco-editor/react';
-import { antdTheme } from './theme';
+import { buildAntdTheme, type ThemeMode } from './theme';
+import { useThemeMode } from './components/useTheme';
 import Shell, { PAGES } from './components/Shell';
 import { Mono, PageHeader, SectionCard, StateBlock, StatusTag, statusColor } from './components/ui';
 import { formatTime } from './utils';
@@ -241,7 +242,7 @@ function Terminal() {
           {active && <Button size="small" danger ghost loading={closing} onClick={() => killSession(active)}>关闭当前会话</Button>}
           <span className="dp-status-row" style={{ marginLeft: 'auto' }}>
             <span className={`dp-dot ${wsState === 'open' ? 'ok' : wsState === 'closed' ? 'bad' : ''}`} />
-            <span style={{ fontSize: 12, color: '#667085' }}>推送 {wsText}</span>
+            <span style={{ fontSize: 12, color: 'var(--dp-text-2)' }}>推送 {wsText}</span>
             {wsState === 'closed' && <Button size="small" type="link" onClick={() => setWsKey((k) => k + 1)}>重连</Button>}
           </span>
         </Space>
@@ -252,7 +253,7 @@ function Terminal() {
       </SectionCard>
 
       <SectionCard title={`实时日志流（${logLines.length}）`}>
-        <pre className="dp-mono" style={{ maxHeight: 180, overflow: 'auto', margin: 0, color: '#475467', background: '#FAFAFB', border: '1px solid #F0F1F3', borderRadius: 6, padding: 8 }}>
+        <pre className="dp-mono" style={{ maxHeight: 180, overflow: 'auto', margin: 0, color: 'var(--dp-text-2)', background: 'var(--dp-code-bg)', border: '1px solid var(--dp-border)', borderRadius: 6, padding: 8 }}>
           {logLines.slice(-40).join('\n') || '（等待运行时事件）'}
         </pre>
       </SectionCard>
@@ -317,9 +318,9 @@ function Logs() {
   };
 
   const diffLineStyle = (line: string): React.CSSProperties => {
-    if (line.startsWith('+')) return { background: '#ECFDF3', color: '#15803D' };
-    if (line.startsWith('-')) return { background: '#FEF3F2', color: '#B42318' };
-    if (line.startsWith('@@')) return { color: '#667085' };
+    if (line.startsWith('+')) return { background: 'var(--dp-success-bg)', color: 'var(--dp-success-fg)' };
+    if (line.startsWith('-')) return { background: 'var(--dp-danger-bg)', color: 'var(--dp-danger-fg)' };
+    if (line.startsWith('@@')) return { color: 'var(--dp-text-2)' };
     return {};
   };
 
@@ -342,13 +343,13 @@ function Logs() {
           </div>
 
           {diag && (
-            <div style={{ borderTop: '1px solid #F0F1F3', paddingTop: 12 }}>
+            <div style={{ borderTop: '1px solid var(--dp-border)', paddingTop: 12 }}>
               <Space size={8} style={{ marginBottom: 8 }}>
                 <StatusTag status={diag.status ?? 'Unknown'} />
                 {diag.diagnosisId && <Mono>诊断 {String(diag.diagnosisId).slice(0, 8)}</Mono>}
               </Space>
               {diag.analysis && (
-                <div style={{ background: '#FAFAFB', border: '1px solid #F0F1F3', borderRadius: 6, padding: 10, whiteSpace: 'pre-wrap', fontSize: 13, marginBottom: 10 }}>
+                <div style={{ background: 'var(--dp-code-bg)', border: '1px solid var(--dp-border)', borderRadius: 6, padding: 10, whiteSpace: 'pre-wrap', fontSize: 13, marginBottom: 10 }}>
                   {diag.analysis}
                 </div>
               )}
@@ -362,7 +363,7 @@ function Logs() {
                           {d.rolledBack ? '已回滚' : d.applied ? '已写入' : '未写入'}
                         </Tag>
                       </Space>
-                      <pre className="dp-mono" style={{ maxHeight: 220, overflow: 'auto', margin: '6px 0 0', background: '#fff', border: '1px solid #F0F1F3', borderRadius: 6, padding: 8 }}>
+                      <pre className="dp-diff dp-mono">
                         {String(d.diff ?? '').split('\n').map((line: string, li: number) => (
                           <div key={li} style={diffLineStyle(line)}>{line || ' '}</div>
                         ))}
@@ -375,7 +376,7 @@ function Logs() {
                 <Space direction="vertical" size={2} style={{ marginBottom: 8 }}>
                   {(diag.verifyAttempts ?? []).map((v: any, i: number) => (
                     <span key={i} style={{ fontSize: 12 }}>
-                      验证 <Mono>{v.command}</Mono> → {v.timedOut ? <span style={{ color: '#B45309' }}>超时</span> : v.exitCode === 0 ? <span style={{ color: '#15803D' }}>通过（exit 0）</span> : <span style={{ color: '#B42318' }}>失败（exit {v.exitCode}）</span>}
+                      验证 <Mono>{v.command}</Mono> → {v.timedOut ? <span style={{ color: 'var(--dp-warning)' }}>超时</span> : v.exitCode === 0 ? <span style={{ color: 'var(--dp-success)' }}>通过（exit 0）</span> : <span style={{ color: 'var(--dp-danger-fg)' }}>失败（exit {v.exitCode}）</span>}
                     </span>
                   ))}
                 </Space>
@@ -1721,6 +1722,7 @@ function readHashPage(): string {
 export default function App() {
   const [page, setPage] = useState<string>(readHashPage);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const { mode: themeMode, resolved, setMode } = useThemeMode();
   const [onboarded, setOnboarded] = useState(() => {
     try { return localStorage.getItem('devpilot.onboarded') === '1'; } catch { return false; }
   });
@@ -1733,6 +1735,34 @@ export default function App() {
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+
+  // 原生菜单栏动作（文件/编辑/视图/导航/帮助）
+  useEffect(() => {
+    type MenuPayload =
+      | { action: 'navigate'; page: string }
+      | { action: 'theme'; mode: ThemeMode }
+      | { action: 'toggle-sider' }
+      | { action: 'import-project' }
+      | { action: 'new-terminal' }
+      | { action: 'run-project' };
+    const bridge = (window as unknown as {
+      devpilot?: { onMenu?: (cb: (p: unknown) => void) => () => void };
+    }).devpilot;
+    if (!bridge?.onMenu) return;
+    return bridge.onMenu((raw) => {
+      const p = raw as MenuPayload;
+      switch (p?.action) {
+        case 'navigate': navigate(p.page); break;
+        case 'theme': setMode(p.mode); break;
+        case 'toggle-sider': window.dispatchEvent(new Event('devpilot:toggle-sider')); break;
+        case 'import-project': navigate('2'); break;
+        case 'new-terminal': navigate('5'); break;
+        case 'run-project': navigate('4'); break;
+        default: break;
+      }
+    });
+  }, [setMode]);
+
   const finishOnboarding = () => setOnboarded(true);
   const rerunOnboarding = () => {
     try { localStorage.removeItem('devpilot.onboarded'); } catch { /* 忽略 */ }
@@ -1764,10 +1794,13 @@ export default function App() {
       default: return null;
     }
   };
-  if (!onboarded) return <ConfigProvider locale={zhCN} theme={antdTheme}><FirstRunWizard onFinish={finishOnboarding} /></ConfigProvider>;
+  const theme = buildAntdTheme(resolved === 'dark');
+  if (!onboarded) {
+    return <ConfigProvider locale={zhCN} theme={theme}><FirstRunWizard onFinish={finishOnboarding} /></ConfigProvider>;
+  }
   return (
-    <ConfigProvider locale={zhCN} theme={antdTheme}>
-      <Shell page={page} onNavigate={navigate}>{render()}</Shell>
+    <ConfigProvider locale={zhCN} theme={theme}>
+      <Shell page={page} onNavigate={navigate} themeMode={themeMode} onThemeChange={setMode}>{render()}</Shell>
     </ConfigProvider>
   );
 }

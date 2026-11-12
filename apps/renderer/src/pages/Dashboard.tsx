@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Button, Card, Col, Input, List, message, Row, Space, Typography } from 'antd';
 import { api } from '../api';
 import { Mono, PageHeader, SectionCard, StateBlock, StatusTag } from '../components/ui';
-import { colors } from '../theme';
+
 
 /** 工作台：主任务 = 导入/选择项目 → 启动 → 看状态。右侧仅放轻量信号。 */
 export default function Dashboard({ go, onOpenProject }: {
@@ -98,15 +98,15 @@ export default function Dashboard({ go, onOpenProject }: {
                       title={
                         <Space size={8}>
                           <Typography.Text strong>{p.name}</Typography.Text>
-                          <span style={{ color: colors.textTertiary, fontSize: 12 }}>{[p.language, p.framework].filter(Boolean).join(' / ') || '未识别'}</span>
+                          <span style={{ color: 'var(--dp-text-3)', fontSize: 12 }}>{[p.language, p.framework].filter(Boolean).join(' / ') || '未识别'}</span>
                         </Space>
                       }
                       description={
                         <Space size={8} style={{ marginTop: 4 }} wrap>
                           <StatusTag status={p.analysis_status === 'confirmed' ? 'Completed' : 'Pending'} text={p.analysis_status === 'confirmed' ? '配置已确认' : '待确认配置'} />
-                          <span style={{ fontSize: 12, color: colors.textSecondary }}>
+                          <span style={{ fontSize: 12, color: 'var(--dp-text-2)' }}>
                             {p.service_count ?? 0} 个服务
-                            {(p.running_count ?? 0) > 0 && <span style={{ color: colors.success }}> · {p.running_count} 运行中</span>}
+                            {(p.running_count ?? 0) > 0 && <span style={{ color: 'var(--dp-success)' }}> · {p.running_count} 运行中</span>}
                           </span>
                           <Mono title={p.root_path}>{p.root_path}</Mono>
                         </Space>
@@ -125,7 +125,7 @@ export default function Dashboard({ go, onOpenProject }: {
               <Space size={24}>
                 <span><Typography.Text strong style={{ fontSize: 20 }}>{running}</Typography.Text> <span className="dp-desc">运行中</span></span>
                 <span>
-                  <Typography.Text strong style={{ fontSize: 20, color: failed ? colors.danger : undefined }}>{failed}</Typography.Text>
+                  <Typography.Text strong style={{ fontSize: 20, color: failed ? 'var(--dp-danger)' : undefined }}>{failed}</Typography.Text>
                   <span className="dp-desc"> 异常</span>
                 </span>
               </Space>

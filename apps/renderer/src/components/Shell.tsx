@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Breadcrumb, Layout, Menu, Tooltip } from 'antd';
+import { Breadcrumb, Dropdown, Layout, Menu, Tooltip } from 'antd';
 import { api } from '../api';
+import type { ThemeMode } from '../theme';
 
 export interface NavPage { key: string; label: string; group: string; desc: string }
 
@@ -46,9 +47,10 @@ function CompactNav({ page, onNavigate }: { page: string; onNavigate: (k: string
               onClick={() => onNavigate(p.key)}
               style={{
                 width: '100%', height: 34, marginBottom: 2, border: 'none', cursor: 'pointer',
-                borderRadius: 6, background: active ? '#EFF4FF' : 'transparent',
-                color: active ? '#2563EB' : '#667085', fontWeight: active ? 600 : 400,
-                fontSize: 12, boxShadow: active ? 'inset 2px 0 0 #2563EB' : undefined,
+                borderRadius: 6, background: active ? 'var(--dp-primary-soft)' : 'transparent',
+                color: active ? 'var(--dp-primary)' : 'var(--dp-text-2)',
+                fontWeight: active ? 600 : 400, fontSize: 12,
+                boxShadow: active ? 'inset 2px 0 0 var(--dp-primary)' : undefined,
               }}
             >
               {p.label.slice(0, 2)}
@@ -60,8 +62,28 @@ function CompactNav({ page, onNavigate }: { page: string; onNavigate: (k: string
   );
 }
 
-export default function Shell({ page, onNavigate, children }: {
-  page: string; onNavigate: (k: string) => void; children: React.ReactNode;
+const THEME_ITEMS: Array<{ key: ThemeMode; label: string }> = [
+  { key: 'system', label: '跟随系统' },
+  { key: 'light', label: '浅色' },
+  { key: 'dark', label: '深色' },
+];
+
+function ThemeIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="4" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M8 1.2v1.8M8 13v1.8M1.2 8h1.8M13 8h1.8M3.4 3.4l1.3 1.3M11.3 11.3l1.3 1.3M12.6 3.4l-1.3 1.3M4.7 11.3l-1.3 1.3"
+        stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export default function Shell({ page, onNavigate, children, themeMode, onThemeChange }: {
+  page: string;
+  onNavigate: (k: string) => void;
+  children: React.ReactNode;
+  themeMode: ThemeMode;
+  onThemeChange: (m: ThemeMode) => void;
 }) {
   const current = PAGES.find((p) => p.key === page) ?? PAGES[0];
   const [health, setHealth] = useState<{ ok: boolean | null }>({ ok: null });
@@ -74,6 +96,13 @@ export default function Shell({ page, onNavigate, children }: {
     try { localStorage.setItem(COLLAPSE_KEY, next ? '1' : '0'); } catch { /* 忽略 */ }
     return next;
   });
+
+  // 菜单栏（视图 → 侧栏）与快捷键共用同一入口
+  useEffect(() => {
+    const onToggle = () => toggle();
+    window.addEventListener('devpilot:toggle-sider', onToggle);
+    return () => window.removeEventListener('devpilot:toggle-sider', onToggle);
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -100,10 +129,7 @@ export default function Shell({ page, onNavigate, children }: {
   return (
     <Layout style={{ height: '100vh' }}>
       <Layout.Sider width={216} collapsedWidth={64} collapsed={collapsed} className="dp-sider" theme="light" trigger={null}>
-        <div className="dp-brand" style={{ justifyContent: collapsed ? 'center' : 'flex-start', padding: collapsed ? '14px 0 10px' : undefined }}>
-          <span className="dp-brand-badge">D</span>
-          {!collapsed && <>DevPilot</>}
-        </div>
+        <div className={`dp-brand${collapsed ? ' collapsed' : ''}`}>{collapsed ? 'DP' : 'DevPilot'}</div>
 
         {collapsed ? (
           <CompactNav page={page} onNavigate={onNavigate} />
@@ -124,7 +150,8 @@ export default function Shell({ page, onNavigate, children }: {
                 type="button" aria-label="设置" onClick={() => onNavigate('9')}
                 style={{
                   width: '100%', height: 32, border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12,
-                  background: page === '9' ? '#EFF4FF' : 'transparent', color: page === '9' ? '#2563EB' : '#667085',
+                  background: page === '9' ? 'var(--dp-primary-soft)' : 'transparent',
+                  color: page === '9' ? 'var(--dp-primary)' : 'var(--dp-text-2)',
                 }}
               >设</button>
             </Tooltip>
@@ -148,14 +175,11 @@ export default function Shell({ page, onNavigate, children }: {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
             <button
               type="button"
+              className="dp-icon-btn"
               onClick={toggle}
               aria-label={collapsed ? '展开侧栏' : '折叠侧栏'}
               aria-expanded={!collapsed}
-              title={collapsed ? '展开侧栏' : '折叠侧栏'}
-              style={{
-                width: 26, height: 26, border: '1px solid #E4E7EC', borderRadius: 6, background: '#fff',
-                cursor: 'pointer', color: '#667085', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              }}
+              title={collapsed ? '展开侧栏（Ctrl+B）' : '折叠侧栏（Ctrl+B）'}
             >
               <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
                 <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="1.2" />
@@ -164,7 +188,25 @@ export default function Shell({ page, onNavigate, children }: {
             </button>
             <Breadcrumb items={[{ title: current.group }, { title: current.label }]} />
           </div>
-          <span style={{ fontSize: 12, color: '#98A2B3', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{current.desc}</span>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+            <span style={{ fontSize: 12, color: 'var(--dp-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {current.desc}
+            </span>
+            <Dropdown
+              trigger={['click']}
+              placement="bottomRight"
+              menu={{
+                items: THEME_ITEMS.map((t) => ({ key: t.key, label: t.label })),
+                selectedKeys: [themeMode],
+                onClick: ({ key }) => onThemeChange(key as ThemeMode),
+              }}
+            >
+              <button type="button" className="dp-icon-btn" aria-label="切换外观" title="切换外观：跟随系统 / 浅色 / 深色">
+                <ThemeIcon />
+              </button>
+            </Dropdown>
+          </div>
         </div>
         <Layout.Content className="dp-content">
           <div className="dp-page">{children}</div>
