@@ -12,6 +12,7 @@ function makeService(modelOverrides: Record<string, unknown> = {}) {
     stub({ broadcast: jest.fn() }),                             // events
     stub({ record: jest.fn() }),                                // audit
     stub({ create: jest.fn() }),                                // notify
+    stub({ execute: jest.fn(), descriptors: () => [], describeForPrompt: () => '' }), // tool registry
   );
   return { ds, svc };
 }

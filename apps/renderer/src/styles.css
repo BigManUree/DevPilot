@@ -41,9 +41,9 @@ button { -webkit-tap-highlight-color: transparent; }
 .dp-sider .ant-layout-sider-children { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .dp-brand { flex: none; height: 65px; display: flex; align-items: center; gap: 10px; padding: 0 17px; border: 0; border-bottom: 1px solid var(--dp-border); color: var(--dp-text); background: transparent; cursor: pointer; text-align: left; }
 .dp-brand.collapsed { justify-content: center; padding: 0; }
-.dp-brand-mark { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 9px; background: var(--dp-text); color: var(--dp-card); font-size: 15px; font-weight: 750; letter-spacing: -.03em; }
+.dp-brand-mark { width: 30px; height: 30px; flex: none; display: grid; place-items: center; background: transparent; color: var(--dp-primary); }
+.dp-brand-mark svg { width: 16px; height: 16px; }
 .dp-brand-name { font-size: 16px; font-weight: 680; letter-spacing: -.025em; }
-.dp-brand-badge { margin-left: auto; padding: 2px 5px; border: 1px solid var(--dp-border); border-radius: 5px; color: var(--dp-text-2); font-size: 9px; font-weight: 700; letter-spacing: .06em; }
 .dp-sider .ant-menu { flex: 1; min-height: 0; overflow: auto; padding: 10px 0 16px; background: transparent; border-inline-end: 0; }
 .dp-sider .ant-menu-item-group-title { padding: 17px 20px 6px; color: var(--dp-text-3); font-size: 10px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
 .dp-sider .ant-menu-item { height: 36px; line-height: 36px; margin-block: 2px; font-size: 13px; transition: background .15s, color .15s; }
@@ -255,17 +255,6 @@ pre { font-family: "Cascadia Code", Consolas, monospace; }
 
 /* Settings and forms */
 .dp-settings-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
-.dp-theme-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.dp-theme-option { padding: 10px; border: 1px solid var(--dp-border); border-radius: 9px; color: var(--dp-text-2); background: var(--dp-card); cursor: pointer; text-align: left; }
-.dp-theme-option.active { border-color: var(--dp-primary); color: var(--dp-primary); background: var(--dp-primary-soft); }
-.dp-theme-preview { height: 58px; display: flex; overflow: hidden; margin-bottom: 9px; border: 1px solid var(--dp-border); border-radius: 6px; background: #F8FAFC; }
-.dp-theme-preview::before { content: ''; width: 25%; border-right: 1px solid #E2E8F0; background: #FFF; }
-.dp-theme-preview::after { content: ''; flex: 1; margin: 10px; border: 1px solid #E2E8F0; border-radius: 3px; background: #FFF; }
-.dp-theme-preview.dark { background: #111827; }
-.dp-theme-preview.dark::before { border-color: #334155; background: #151D2B; }
-.dp-theme-preview.dark::after { border-color: #334155; background: #1E293B; }
-.dp-theme-preview.system { background: linear-gradient(105deg, #F8FAFC 50%, #111827 50%); }
-.dp-theme-option strong { font-size: 11px; font-weight: 600; }
 .dp-provider-row { transition: border-color .15s, background .15s; }
 .dp-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .dp-form-stack { display: grid; gap: 12px; }
@@ -313,8 +302,40 @@ pre { font-family: "Cascadia Code", Consolas, monospace; }
   .dp-agent-sidebar { max-height: 240px; border-right: 0; border-bottom: 1px solid var(--dp-border); }
   .dp-agent-main { min-height: 520px; }
   .dp-agent-inspector { max-height: none; }
-  .dp-theme-options { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto; animation-duration: .01ms; animation-iteration-count: 1; transition-duration: .01ms; }
 }
+
+/* ---------- 访问地址一行式布局 ---------- */
+.dp-access-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; padding: 10px 14px; border: 1px solid var(--dp-border); border-radius: 9px; background: var(--dp-code-bg); }
+.dp-access-label { flex-shrink: 0; margin-right: 4px; }
+.dp-access-chip { display: inline-flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 10px; border: 1px solid var(--dp-border); border-radius: 7px; background: var(--dp-card); }
+.dp-access-name { font-weight: 600; font-size: 12px; flex-shrink: 0; }
+.dp-access-url { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
+
+/* ---------- 启动任务后台执行悬浮状态条 ---------- */
+.dp-start-pill { position: fixed; right: 24px; bottom: 24px; z-index: 1100; display: flex; align-items: center; gap: 9px; padding: 10px 16px; border: 1px solid var(--dp-border-strong); border-radius: 999px; background: var(--dp-card); color: var(--dp-text); font-size: 12.5px; box-shadow: 0 8px 24px rgba(15, 23, 42, .16); cursor: pointer; user-select: none; }
+.dp-start-pill:hover { border-color: var(--dp-primary, #2563eb); }
+.dp-start-pill-dot { width: 9px; height: 9px; border-radius: 50%; background: #2563eb; animation: dp-pill-pulse 1.2s ease-in-out infinite; }
+@keyframes dp-pill-pulse { 0%, 100% { opacity: .35; transform: scale(.85); } 50% { opacity: 1; transform: scale(1.1); } }
+html[data-theme='dark'] .dp-start-pill { box-shadow: 0 8px 24px rgba(0, 0, 0, .45); }
+
+
+/* ---------- 项目卡片简介（导入时 Agent 生成） ---------- */
+.dp-project-desc { font-size: 12px; line-height: 1.5; color: var(--dp-text-2, var(--dp-text)); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin: 2px 0 6px; }
+
+/* ---------- 详情抽屉头部信息卡（路径 + 简介） ---------- */
+.dp-detail-head { margin: 0 0 16px; padding: 12px 14px; background: var(--dp-code-bg); border: 1px solid var(--dp-border); border-radius: 9px; }
+.dp-detail-path { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dp-detail-path-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dp-text); font-size: 12px; }
+.dp-detail-copy { flex-shrink: 0; font-size: 12px; color: var(--dp-text-2, var(--dp-text)); }
+.dp-detail-copy:hover { color: var(--dp-primary, #2563eb); }
+.dp-detail-intro { display: flex; align-items: baseline; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--dp-border); }
+.dp-detail-intro-label { flex-shrink: 0; padding: 1px 7px; font-size: 11px; font-weight: 600; line-height: 18px; color: var(--dp-primary, #2563eb); background: color-mix(in srgb, var(--dp-primary, #2563eb) 10%, transparent); border-radius: 4px; }
+.dp-detail-intro-text { font-size: 12.5px; line-height: 1.65; color: var(--dp-text); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+
+/* ---------- CLI 项目使用提示条 ---------- */
+.dp-cli-hint { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; padding: 10px 14px; border: 1px dashed var(--dp-border-strong, var(--dp-border)); border-radius: 9px; background: var(--dp-code-bg); }
+.dp-cli-hint .ant-typography { margin: 0; }
+.dp-cli-hint > .ant-typography:nth-child(2) { flex: 1; min-width: 0; font-size: 12px; }

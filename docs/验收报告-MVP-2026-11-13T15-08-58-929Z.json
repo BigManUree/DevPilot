@@ -1,0 +1,149 @@
+{
+  "date": "2026-11-13T15:08:58.931Z",
+  "version": "0.2.0-smart-upgrade",
+  "results": [
+    {
+      "id": "S10",
+      "name": "健康检查",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "S9",
+      "name": "SQLite schema 版本化迁移",
+      "pass": true,
+      "detail": "v17"
+    },
+    {
+      "id": "S1",
+      "name": "导入混合项目并识别 vue+maven",
+      "pass": true,
+      "detail": "2 服务"
+    },
+    {
+      "id": "S1b",
+      "name": "组件树档案（含证据与置信度）",
+      "pass": "d77553a0d067027f54bca7e27cb793eb",
+      "detail": "2 组件 fp=d77553a0"
+    },
+    {
+      "id": "S2",
+      "name": "服务独立启动/停止",
+      "pass": true,
+      "detail": "start=Running stop=true"
+    },
+    {
+      "id": "S6",
+      "name": "外部进程存活（停止仅限会话进程）",
+      "pass": true,
+      "detail": "extPid=14568"
+    },
+    {
+      "id": "S3",
+      "name": "端口占用检测",
+      "pass": true,
+      "detail": "[{\"service\":\"java-backend\",\"port\":8080,\"occupied\":false},{\"service\":\"echo-accept-1794582456926\",\"port\":18899,\"occupied\":true}]"
+    },
+    {
+      "id": "S4",
+      "name": "环境需求比对与缺失报告",
+      "pass": true,
+      "detail": "req=2 missing=0"
+    },
+    {
+      "id": "S4b",
+      "name": "多版本扫描（真实执行 --version）",
+      "pass": true,
+      "detail": "node=22.22.2,22.22.2 java=4 个"
+    },
+    {
+      "id": "S4c",
+      "name": "项目要求 vs 本机版本匹配",
+      "pass": true,
+      "detail": "overall=no-constraints matches=0"
+    },
+    {
+      "id": "S5",
+      "name": "未授权命令阻止并生成审批",
+      "pass": true,
+      "detail": "PERMISSION_DENIED_PENDING_APPROVAL"
+    },
+    {
+      "id": "S5b",
+      "name": "审批授权后命令放行",
+      "pass": true,
+      "detail": "exit=0"
+    },
+    {
+      "id": "S5c",
+      "name": "Agent 工具注册中心（>=20 个 Schema 化工具）",
+      "pass": true,
+      "detail": "21 个工具"
+    },
+    {
+      "id": "S7",
+      "name": "修改前备份 + 可回滚",
+      "pass": false,
+      "detail": ""
+    },
+    {
+      "id": "S7b",
+      "name": "安全：workspace 项目外读取被拒绝",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "S8",
+      "name": "任务取消",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "S11",
+      "name": "审计记录存在且无明文密钥泄漏",
+      "pass": true,
+      "detail": "50 条"
+    },
+    {
+      "id": "S12",
+      "name": "诊断规则可用（diagnostics.classify 经 Agent 工具注册）",
+      "pass": true,
+      "detail": "classifier 规则库可经工具网关调用"
+    },
+    {
+      "id": "S13",
+      "name": "共享服务引用保护（双项目 fixture）",
+      "pass": true,
+      "detail": "stopA=false(shared service shared-echo-1794582527840 referenced by 1 oth) stopB=true"
+    },
+    {
+      "id": "S13b",
+      "name": "跨设备迁移路径重映射",
+      "pass": true,
+      "detail": "remapped=true services=3"
+    },
+    {
+      "id": "S14",
+      "name": "统一导入 ZIP（安全解压+统一分析）",
+      "pass": true,
+      "detail": "phase=done project=16a63ee3"
+    },
+    {
+      "id": "S15",
+      "name": "运行档案落库（run_archives）",
+      "pass": true,
+      "detail": "3 条运行记录"
+    }
+  ],
+  "summary": {
+    "total": 22,
+    "pass": 21,
+    "failed": 1
+  },
+  "skipped": [
+    "自动修复 LLM 全链路（需配置模型 API Key）",
+    "Docker 导入端到端（需 Docker Engine 运行）",
+    "HTTP 下载导入端到端（需外网）"
+  ],
+  "securityGate": "S5/S5b/S6/S7/S7b/S11 全部通过 —— 未授权执行、外部进程误杀、备份回滚、路径围栏、密钥脱敏门禁"
+}

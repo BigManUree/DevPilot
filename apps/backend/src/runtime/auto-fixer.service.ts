@@ -1,9 +1,11 @@
 import { Injectable } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ModelService } from '../agents/model.service';
 import { ToolGatewayService } from '../permissions/tool-gateway.service';
 import { LogService } from '../logs/log.service';
+import { DatabaseService } from '../database/database.module';
 
 /**
  * 自动修复 Agent（供 AutoStartService 调用）
@@ -53,6 +55,8 @@ const CMD_ALLOW = [
   /^(python|python3|py)(\.exe)?\s+-c\s+/i,
   /^(pip|pip3)(\.exe)?\s+(install|uninstall|list|freeze)\b/i,
   /^[.\\/]*(\.venv|venv)[\\/]Scripts[\\/][\w.-]+(\.exe)?\s+/i,
+  /^"[^"]*[\\/](\.venv|venv)[\\/]Scripts[\\/][\w.-]+(\.exe)?"\s+/i,
+  /^[A-Za-z]:[\\/][^"']*[\\/](\.venv|venv)[\\/]Scripts[\\/][\w.-]+(\.exe)?\s+/i,
   /^(node|npm|pnpm|yarn|npx|corepack)\b/i,
   /^(go|cargo|rustup)\b/i,
   /^(dotnet|mvn|gradle|gradlew)(\.bat)?\b/i,
@@ -87,10 +91,91 @@ export class AutoFixerService {
     private readonly model: ModelService,
     private readonly gateway: ToolGatewayService,
     private readonly logs: LogService,
+    private readonly ds: DatabaseService,
   ) {}
+
+  /**
+   * 确定性依赖预检（不依赖模型）：node 项目的 node_modules 缺失时先安装依赖。
+   * 包管理器按锁文件选择：pnpm-lock.yaml → pnpm，yarn.lock → yarn，否则 npm。
+   * 返回是否执行了安装。
+   */
+  async ensureNodeDeps(req: { projectId: string; rootPath: string; projectName: string }): Promise<boolean> {
+    const pkg = path.join(req.rootPath, 'package.json');
+    if (!fs.existsSync(pkg)) return false;
+    // 子目录里已有 node_modules（如 workspace 根安装过）也不跳过：根缺失就是缺
+    if (fs.existsSync(path.join(req.rootPath, 'node_modules'))) return false;
+    const pm = fs.existsSync(path.join(req.rootPath, 'pnpm-lock.yaml')) ? 'pnpm'
+      : fs.existsSync(path.join(req.rootPath, 'yarn.lock')) ? 'yarn' : 'npm';
+    this.logs.log({ level: 'info', sourceModule: 'autostart', projectId: req.projectId, message: `依赖预检：${req.rootPath} 缺少 node_modules，执行 ${pm} install` });
+    const r = await this.runCommand(`${pm} install`, req.rootPath, req.projectId);
+    return r.exitCode === 0;
+  }
+
+  /**
+   * 确定性依赖预检（Python 项目）：没有虚拟环境时创建 .venv 并安装依赖。
+   * - requirements.txt → pip install -r requirements.txt
+   * - pyproject.toml（含 poetry-core 等 PEP 517 后端）→ pip install .
+   * 装完后 autostart 的 refineStartCommand 会自动把裸 python 命令切到 .venv 解释器。
+   */
+  async ensurePythonDeps(req: { projectId: string; rootPath: string; projectName: string }): Promise<boolean> {
+    const root = req.rootPath;
+    const hasReq = fs.existsSync(path.join(root, 'requirements.txt'));
+    const hasPyproject = fs.existsSync(path.join(root, 'pyproject.toml'));
+    if (!hasReq && !hasPyproject) return false;
+    const venvPython = [
+      path.join(root, '.venv', 'Scripts', 'python.exe'),
+      path.join(root, 'venv', 'Scripts', 'python.exe'),
+      path.join(root, '.venv', 'bin', 'python'),
+      path.join(root, 'venv', 'bin', 'python'),
+    ].find((p) => fs.existsSync(p));
+    if (venvPython) return false; // 已有虚拟环境，交给修复循环兜底
+
+    this.logs.log({ level: 'info', sourceModule: 'autostart', projectId: req.projectId, message: `依赖预检：${root} 缺少虚拟环境，创建 .venv 并安装依赖` });
+    const mk = await this.runCommand('python -m venv .venv', root, req.projectId);
+    if (mk.exitCode !== 0) {
+      this.logs.log({ level: 'warn', sourceModule: 'autostart', projectId: req.projectId, message: `创建 .venv 失败：${mk.output.slice(-300) || mk.error || 'exit!=0'}` });
+      return false;
+    }
+    const winPy = path.join(root, '.venv', 'Scripts', 'python.exe');
+    const vpy = fs.existsSync(winPy) ? winPy : path.join(root, '.venv', 'bin', 'python');
+    const install = hasReq ? `"${vpy}" -m pip install -r requirements.txt` : `"${vpy}" -m pip install .`;
+    const r = await this.runCommand(install, root, req.projectId);
+    if (r.exitCode !== 0) {
+      this.logs.log({ level: 'warn', sourceModule: 'autostart', projectId: req.projectId, message: `.venv 依赖安装失败（交给自动修复）：${r.output.slice(-400)}` });
+      return false;
+    }
+    return true;
+  }
+
+  /** 执行一条命令（供 fix 主流程与依赖预检复用），返回退出码与输出 */
+  private async runCommand(command: string, cwd: string, projectId: string): Promise<{ exitCode: number | null; output: string; ok: boolean; error?: string }> {
+    const HARD_TIMEOUT_MS = 180_000;
+    const call = this.gateway.call(
+      { subjectType: 'user', subjectId: 'local-user', tool: 'command.exec', params: { command, cwd, timeoutMs: HARD_TIMEOUT_MS }, projectId },
+      'command_execution',
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const hardTimeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), HARD_TIMEOUT_MS + 15_000);
+    });
+    const r = (await Promise.race([call, hardTimeout])) ?? { ok: false, permission: 'allowed' as const, toolCallId: '', error: `命令超过 ${Math.round(HARD_TIMEOUT_MS / 1000)}s 未结束，已跳过` };
+    if (timer) clearTimeout(timer);
+    const data = ((r as { data?: unknown }).data ?? {}) as { exitCode?: number | null; stdout?: string; stderr?: string; timedOut?: boolean };
+    const output = `${data.stdout ?? ''}${data.stderr ?? ''}`.trim().slice(-4000);
+    return { exitCode: r.ok ? (data.exitCode ?? null) : null, output, ok: (r as { ok?: boolean }).ok === true, error: (r as { error?: string }).error };
+  }
 
   /** 生成并执行修复计划；返回是否真正产生了变更（无变更 → 上层放弃重试） */
   async fix(req: FixRequest): Promise<FixOutcome> {
+    // 修复记录 v2（V16）：先落 pending，结束时回填结果
+    const repairId = randomUUID();
+    const { classifyError } = await import('../diagnostics/classifier');
+    const diagnosis = req.logText ? classifyError(req.logText) : null;
+    this.ds.db.prepare(
+      `INSERT INTO repair_records_v2 (id, project_id, category, confidence, evidence_json, risk, outcome, created_at)
+       VALUES (?, ?, ?, ?, ?, 'L2', 'pending', ?)`,
+    ).run(repairId, req.projectId, diagnosis?.category ?? 'unknown', diagnosis?.confidence ?? 0.1, JSON.stringify(diagnosis?.evidence ?? []), new Date().toISOString());
+
     const plan = await this.propose(req);
     const nextStart = (plan.startCommand ?? '').trim();
     const curStart = (req.startCommand ?? '').trim();
@@ -110,10 +195,29 @@ export class AutoFixerService {
     for (const raw of plan.commands ?? []) {
       const command = String(raw ?? '').trim();
       if (!command) continue;
+
+      // 支持「cd 子目录 && 命令」（monorepo / 子包项目的依赖要装到子目录里）：
+      // 校验子目录必须在项目根内，实际命令部分仍要走白名单 + 黑名单。
+      let cwd = req.rootPath;
+      let effective = command;
+      const cdMatch = command.match(/^cd\s+("[^"]+"|'[^']+'|\S+)\s*&&\s*([\s\S]+)$/i);
+      if (cdMatch) {
+        const dir = cdMatch[1].replace(/^["']|["']$/g, '');
+        const resolved = path.isAbsolute(dir) ? path.resolve(dir) : path.resolve(req.rootPath, dir);
+        const rel = path.relative(req.rootPath, resolved);
+        if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+          outcome.ranCommands.push({ command, exitCode: null, output: '', skipped: 'cd 目标越出项目根，未执行' });
+          this.logs.log({ level: 'warn', sourceModule: 'autostart', projectId: req.projectId, message: `拒绝越界 cd：${dir}` });
+          continue;
+        }
+        cwd = resolved;
+        effective = cdMatch[2].trim();
+      }
+
       // 模型常把可执行文件加引号（"".venv\Scripts\python.exe" -m pip ..."），
       // 白名单匹配前先摘掉最外层引号，否则合法命令会被误判成"不在白名单"。
-      const normalized = command.replace(/^"([^"]+)"\s*/, '$1 ').replace(/^'([^']+)'\s*/, '$1 ').trim();
-      const denied = CMD_DENY.find((re) => re.test(normalized) || re.test(command));
+      const normalized = effective.replace(/^"([^"]+)"\s*/, '$1 ').replace(/^'([^']+)'\s*/, '$1 ').trim();
+      const denied = CMD_DENY.find((re) => re.test(normalized) || re.test(effective));
       if (denied) {
         outcome.ranCommands.push({ command, exitCode: null, output: '', skipped: '命中禁止规则，未执行' });
         this.logs.log({ level: 'warn', sourceModule: 'autostart', projectId: req.projectId, message: `拒绝执行命令（危险操作）：${command}` });
@@ -124,27 +228,16 @@ export class AutoFixerService {
         this.logs.log({ level: 'warn', sourceModule: 'autostart', projectId: req.projectId, message: `拒绝执行命令（不在白名单）：${command}` });
         continue;
       }
-      const HARD_TIMEOUT_MS = 180_000;
-      const call = this.gateway.call(
-        { subjectType: 'user', subjectId: 'local-user', tool: 'command.exec', params: { command, cwd: req.rootPath, timeoutMs: HARD_TIMEOUT_MS }, projectId: req.projectId },
-        'command_execution',
-      );
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const hardTimeout = new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), HARD_TIMEOUT_MS + 15_000);
-      });
-      const r = (await Promise.race([call, hardTimeout])) ?? { ok: false, permission: 'allowed' as const, toolCallId: '', error: `命令超过 ${Math.round(HARD_TIMEOUT_MS / 1000)}s 未结束，已跳过` };
-      if (timer) clearTimeout(timer);
-      const data = ((r as { data?: unknown }).data ?? {}) as { exitCode?: number | null; stdout?: string; stderr?: string; timedOut?: boolean };
-      const output = `${data.stdout ?? ''}${data.stderr ?? ''}`.trim().slice(-4000);
-      const exitCode = r.ok ? (data.exitCode ?? null) : null;
+      const r = await this.runCommand(effective, cwd, req.projectId);
+      const exitCode = r.exitCode;
+      const output = r.output;
       outcome.ranCommands.push({ command, exitCode, output });
       outcome.changed = true;
       this.logs.log({
         level: exitCode === 0 ? 'info' : 'warn',
         sourceModule: 'autostart',
         projectId: req.projectId,
-        message: `执行修复命令（exit=${exitCode ?? 'err'}）：${command}${(r as { ok?: boolean }).ok ? '' : ` | ${(r as { error?: string }).error ?? ''}`}`,
+        message: `执行修复命令（exit=${exitCode ?? 'err'}${cwd !== req.rootPath ? `，cwd=${path.relative(req.rootPath, cwd) || '.'}` : ''}）：${command}${r.ok ? '' : ` | ${r.error ?? ''}`}`,
       });
     }
 
@@ -177,6 +270,16 @@ export class AutoFixerService {
       }
     }
 
+    // 修复记录回填：动作 + 结果
+    try {
+      this.ds.db.prepare(
+        `UPDATE repair_records_v2 SET applied_files_json=?, ran_commands_json=?, outcome=?, finished_at=? WHERE id=?`,
+      ).run(
+        JSON.stringify(outcome.appliedFiles), JSON.stringify(outcome.ranCommands).slice(0, 4000),
+        outcome.changed ? 'applied' : 'no-op', new Date().toISOString(), repairId,
+      );
+    } catch { /* 记录失败不阻断修复 */ }
+
     return outcome;
   }
 
@@ -193,6 +296,7 @@ export class AutoFixerService {
       '你是 DevPilot 自动修复 Agent，目标是让用户本地项目**成功启动**，不要让人再手工执行命令。',
       '只输出 JSON：{"analysis":string,"commands":string[],"files":[{"path":string,"content":string}],"startCommand":string|null,"port":number|null,"explanation":string}',
       'commands 会在项目根目录下用 Windows cmd 执行；只允许安装依赖、构建、初始化类命令。',
+      '日志出现 Failed to resolve import "xxx" / Cannot find module "xxx" 时，说明缺少依赖：给出安装命令（npm/pnpm/yarn install <包名>，按项目锁文件选包管理器；依赖属于子包/子目录时用「cd 子目录 && <安装命令>」）。',
       '禁止：删除文件、改注册表、结束其它进程、修改系统设置、任何不可恢复操作。',
       '优先使用项目自带运行环境（如 .venv\\Scripts\\python.exe、node_modules、gradlew）。',
       '纯静态站点（只有 index.html 一类文件）可用 "python -m http.server <端口>" 起服务；端口取 8000-8999 里大概率空闲的值。',

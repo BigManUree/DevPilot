@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { RuntimeService } from './runtime.service';
 import { RuntimeController } from './runtime.controller';
 import { AutoStartService } from './autostart.service';
@@ -10,9 +10,9 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { AgentsModule } from '../agents/agents.module';
 
 @Module({
-  imports: [PermissionsModule, EventsModule, LogsModule, NotificationsModule, AgentsModule],
+  imports: [PermissionsModule, EventsModule, LogsModule, NotificationsModule, forwardRef(() => AgentsModule)],
   providers: [RuntimeService, AutoFixerService, AutoStartService],
   controllers: [RuntimeController],
-  exports: [RuntimeService, AutoStartService],
+  exports: [RuntimeService, AutoStartService, AutoFixerService],
 })
 export class RuntimeModule {}

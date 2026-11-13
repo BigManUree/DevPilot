@@ -60,7 +60,7 @@ function UtilityIcon({ name }: { name: 'search' | 'sun' | 'moon' | 'system' | 's
     sun: <><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></>,
     moon: <path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2Z"/>,
     system: <><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></>,
-    settings: <><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></>,
+    settings: <><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></>,
     plus: <path d="M12 5v14M5 12h14"/>,
     panel: <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></>,
   };
@@ -134,8 +134,13 @@ export default function Shell({ page, onNavigate, children, themeMode, onThemeCh
     <Layout className="dp-shell">
       <Layout.Sider width={232} collapsedWidth={68} collapsed={collapsed} className="dp-sider" theme="light" trigger={null}>
         <button className={`dp-brand${collapsed ? ' collapsed' : ''}`} onClick={() => onNavigate('1')} aria-label="返回工作台">
-          <span className="dp-brand-mark"><span>D</span></span>
-          {!collapsed && <><span className="dp-brand-name">DevPilot</span><span className="dp-brand-badge">AI</span></>}
+          <span className="dp-brand-mark" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="m3 11 19-9-9 19-2-8-8-2Z"/>
+              <path d="M21 2 12 13"/>
+            </svg>
+          </span>
+          {!collapsed && <span className="dp-brand-name">DevPilot</span>}
         </button>
         {collapsed ? (
           <nav className="dp-compact-nav" aria-label="主导航">

@@ -5,6 +5,7 @@ import {
 } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { api, pickDirectory } from './api';
+import { useDevPilotEvents } from './useEvents';
 import { buildAntdTheme, type ThemeMode } from './theme';
 import { useThemeMode } from './components/useTheme';
 import Shell, { PAGES } from './components/Shell';
@@ -120,9 +121,6 @@ function Logs() {
   const [rows, setRows] = useState<any[]>([]);
   const [level, setLevel] = useState<string | undefined>();
   const [source, setSource] = useState<string | undefined>();
-  const [logExcerpt, setLogExcerpt] = useState('');
-  const [diag, setDiag] = useState<any>(null);
-  const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // 「查看内容」弹窗：读取该行来源模块对应的日志文件尾部正文
@@ -160,100 +158,8 @@ function Logs() {
   }, [level, source]);
   useEffect(() => { void load(); }, [load]);
 
-  const runDiagnose = () => {
-    if (!logExcerpt.trim()) { message.warning('先粘贴需要诊断的错误日志'); return; }
-    Modal.confirm({
-      title: '开始 AI 诊断修复？',
-      content: (
-        <div>
-          <p>诊断会把日志摘录（{logExcerpt.length} 字符）发给当前模型。</p>
-          <p>模型给出的文件修改会先备份再写入，写入与命令执行都经过审批门。</p>
-        </div>
-      ),
-      okText: '开始诊断',
-      onOk: async () => {
-        setRunning(true);
-        setDiag(null);
-        try {
-          const r = await api<any>('/diagnostics', 'POST', { logExcerpt });
-          setDiag(r);
-          message.info(`诊断状态：${r?.status ?? '未知'}`);
-        } catch (e: any) {
-          message.error('诊断失败：' + (e?.message ?? String(e)));
-        } finally {
-          setRunning(false);
-        }
-      },
-    });
-  };
-
-  const diffLineStyle = (line: string): React.CSSProperties => {
-    if (line.startsWith('+')) return { background: 'var(--dp-success-bg)', color: 'var(--dp-success-fg)' };
-    if (line.startsWith('-')) return { background: 'var(--dp-danger-bg)', color: 'var(--dp-danger-fg)' };
-    if (line.startsWith('@@')) return { color: 'var(--dp-text-2)' };
-    return {};
-  };
-
   return (
     <div>
-      <SectionCard title="AI 诊断修复" style={{ marginBottom: 16 }}>
-        <p className="dp-desc" style={{ marginTop: 0, marginBottom: 10 }}>
-          流程：读日志 → 模型定位根因 → 生成文件级修复 → 备份 → 写入（审批门）。
-        </p>
-        <Space direction="vertical" style={{ width: '100%' }}>
-          <Input.TextArea rows={4} placeholder="粘贴错误日志或堆栈" value={logExcerpt} onChange={(e) => setLogExcerpt(e.target.value)} />
-          <div>
-            <Button type="primary" loading={running} onClick={runDiagnose}>诊断并修复</Button>
-          </div>
-
-          {diag && (
-            <div style={{ borderTop: '1px solid var(--dp-border)', paddingTop: 12 }}>
-              <Space size={8} style={{ marginBottom: 8 }}>
-                <StatusTag status={diag.status ?? 'Unknown'} />
-                {diag.diagnosisId && <Mono>诊断 {String(diag.diagnosisId).slice(0, 8)}</Mono>}
-              </Space>
-              {diag.analysis && (
-                <div style={{ background: 'var(--dp-code-bg)', border: '1px solid var(--dp-border)', borderRadius: 6, padding: 10, whiteSpace: 'pre-wrap', fontSize: 13, marginBottom: 10 }}>
-                  {diag.analysis}
-                </div>
-              )}
-              {(diag.diffs ?? []).length > 0 && (
-                <div style={{ marginBottom: 10 }}>
-                  {(diag.diffs ?? []).map((d: any, i: number) => (
-                    <div key={i} style={{ marginBottom: 8 }}>
-                      <Space size={8}>
-                        <Mono>{d.path}</Mono>
-                        <Tag color={d.rolledBack ? 'orange' : d.applied ? 'green' : 'default'}>
-                          {d.rolledBack ? '已回滚' : d.applied ? '已写入' : '未写入'}
-                        </Tag>
-                      </Space>
-                      <pre className="dp-diff dp-mono">
-                        {String(d.diff ?? '').split('\n').map((line: string, li: number) => (
-                          <div key={li} style={diffLineStyle(line)}>{line || ' '}</div>
-                        ))}
-                      </pre>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {(diag.verifyAttempts ?? []).length > 0 && (
-                <Space direction="vertical" size={2} style={{ marginBottom: 8 }}>
-                  {(diag.verifyAttempts ?? []).map((v: any, i: number) => (
-                    <span key={i} style={{ fontSize: 12 }}>
-                      验证 <Mono>{v.command}</Mono> → {v.timedOut ? <span style={{ color: 'var(--dp-warning)' }}>超时</span> : v.exitCode === 0 ? <span style={{ color: 'var(--dp-success)' }}>通过（exit 0）</span> : <span style={{ color: 'var(--dp-danger-fg)' }}>失败（exit {v.exitCode}）</span>}
-                    </span>
-                  ))}
-                </Space>
-              )}
-              {diag.report && <div style={{ whiteSpace: 'pre-wrap', fontSize: 13, marginBottom: 8 }}>{diag.report}</div>}
-              <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }} copyable={{ text: JSON.stringify(diag, null, 2) }}>
-                复制原始响应
-              </Typography.Paragraph>
-            </div>
-          )}
-        </Space>
-      </SectionCard>
-
       <SectionCard title={`日志检索${rows.length ? `（${rows.length}）` : ''}`}>
         <Space wrap style={{ marginBottom: 8 }}>
           <Select allowClear placeholder="级别" style={{ width: 140 }} value={level} onChange={setLevel}
@@ -404,7 +310,7 @@ function Environments() {
 
 /* ---------- 系统设置（模型供应商：ccswitch 式卡片切换，官方品牌图标） ---------- */
 
-function Settings({ rerunOnboarding, themeMode, onThemeChange }: { rerunOnboarding: () => void; themeMode: ThemeMode; onThemeChange: (mode: ThemeMode) => void }) {
+function Settings({ rerunOnboarding }: { rerunOnboarding: () => void }) {
   const [st, setSt] = useState<any>(null);
   const [switching, setSwitching] = useState<string | null>(null);
   // 配置弹窗：编辑某个供应商的 Key / 模型 / Base URL
@@ -462,21 +368,6 @@ function Settings({ rerunOnboarding, themeMode, onThemeChange }: { rerunOnboardi
   const current = st?.providers?.find((p: any) => p.active);
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
-      <Card size="small" title="外观与主题">
-        <p className="dp-desc" style={{ marginTop: 0, marginBottom: 14 }}>选择浅色、深色，或随操作系统自动切换。设置会保存在本机，并在下次启动时恢复。</p>
-        <div className="dp-theme-options">
-          {([
-            { key: 'light' as ThemeMode, label: '浅色模式', className: '' },
-            { key: 'dark' as ThemeMode, label: '深色模式', className: 'dark' },
-            { key: 'system' as ThemeMode, label: '跟随系统', className: 'system' },
-          ]).map((option) => (
-            <button key={option.key} type="button" className={`dp-theme-option${themeMode === option.key ? ' active' : ''}`} onClick={() => onThemeChange(option.key)} aria-pressed={themeMode === option.key}>
-              <div className={`dp-theme-preview ${option.className}`} />
-              <strong>{option.label}{themeMode === option.key ? ' · 当前' : ''}</strong>
-            </button>
-          ))}
-        </div>
-      </Card>
       <Card size="small" title="模型供应商">
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
           全部走 OpenAI 兼容协议，点击卡片上的「切换」自由更换当前模型，点「配置」填写 Key / 模型 / Base URL。
@@ -1449,8 +1340,13 @@ function AgentsCenterPage() {
     try { setDetail(await api(`/tasks/${selectedId}`)); } catch { setDetail(null); }
   }, [selectedId]);
 
-  useEffect(() => { void load(); const timer = setInterval(load, 4000); return () => clearInterval(timer); }, [load]);
+  useEffect(() => { void load(); const timer = setInterval(load, 8000); return () => clearInterval(timer); }, [load]);
   useEffect(() => { void loadDetail(); const timer = setInterval(loadDetail, 4000); return () => clearInterval(timer); }, [loadDetail]);
+  // 实时事件：任务状态变化 / 审批需求 → 立即刷新（WS，替代纯轮询）
+  useDevPilotEvents(['task.status.changed', 'approval.required', 'tool.call.completed', 'task.progress'], () => {
+    void load();
+    void loadDetail();
+  });
 
   const createTask = async () => {
     if (!goal.trim()) { message.warning('请先描述本次 Agent 任务目标'); return; }
@@ -1527,16 +1423,45 @@ function AgentsCenterPage() {
               </Space>
             </div>
             <div className="dp-agent-timeline">
-              <div className="dp-agent-pane-title" style={{ padding: '0 0 10px' }}><span>规划与执行进度</span><span>{subtasks.length} 个子任务</span></div>
-              {subtasks.map((subtask, index) => (
-                <div className="dp-agent-step" key={subtask.id ?? index}>
-                  <div className="dp-agent-step-head"><span className="dp-agent-step-title">{String(index + 1).padStart(2, '0')} · {subtask.assigned_agent ?? 'Agent'}</span><StatusTag status={subtask.status}/></div>
-                  <pre>{typeof parseJson(subtask.input_json) === 'string' ? parseJson(subtask.input_json) : JSON.stringify(parseJson(subtask.input_json), null, 2)}</pre>
-                  {(subtask.result_summary || subtask.result_json) && <pre>{subtask.result_summary ?? JSON.stringify(parseJson(subtask.result_json), null, 2)}</pre>}
+              <div className="dp-agent-pane-title" style={{ padding: '0 0 10px' }}><span>规划与执行进度</span><span>{subtasks.length} 次工具调用</span></div>
+              {subtasks.map((subtask, index) => {
+                // 结构化工具卡片：tool + note + params 摘要 + 真实结果（exitCode/错误），不再是裸 JSON
+                const input = parseJson(subtask.input_json) ?? {};
+                const toolName = typeof input === 'object' ? String(input.tool ?? subtask.assigned_agent ?? '工具调用') : String(subtask.assigned_agent ?? '工具调用');
+                const note = typeof input === 'object' ? String(input.note ?? '') : '';
+                const params = typeof input === 'object' && input.params ? input.params as Record<string, unknown> : {};
+                const output = subtask.result_json ? parseJson(subtask.result_json) : null;
+                const exitCode = output && typeof output === 'object' ? (output as Record<string, unknown>).exitCode : undefined;
+                const errorText = output && typeof output === 'object' ? String((output as Record<string, unknown>).error ?? '') : (subtask.result_summary ?? '');
+                const paramSummary = Object.entries(params).map(([k, v]) => `${k}=${String(v).slice(0, 60)}`).join('，').slice(0, 120);
+                return (
+                  <div className="dp-agent-step" key={subtask.id ?? index}>
+                    <div className="dp-agent-step-head">
+                      <span className="dp-agent-step-title">{String(index + 1).padStart(2, '0')} · {toolName}</span>
+                      <StatusTag status={subtask.status}/>
+                    </div>
+                    {note && <p className="dp-desc" style={{ margin: '2px 0' }}>{note}</p>}
+                    {paramSummary && <div className="dp-agent-kv"><span>参数</span><strong title={JSON.stringify(params)}>{paramSummary || '—'}</strong></div>}
+                    {exitCode !== undefined && exitCode !== null && <div className="dp-agent-kv"><span>退出码</span><strong>{String(exitCode)}</strong></div>}
+                    {errorText && <pre style={{ color: 'var(--dp-danger, #cf1322)' }}>{errorText.slice(0, 400)}</pre>}
+                    {!errorText && (subtask.result_summary) && <pre>{subtask.result_summary.slice(0, 400)}</pre>}
+                  </div>
+                );
+              })}
+              {subtasks.length === 0 && <StateBlock empty emptyText={selected.status === 'Pending' ? '任务已就绪，点击开始执行生成规划' : '当前任务尚无执行记录'}>{null}</StateBlock>}
+              {/* 计划版本（每次重规划落一条，可解释"为什么改计划"） */}
+              {(detail?.plans ?? []).length > 0 && (
+                <div className="dp-agent-step">
+                  <div className="dp-agent-step-head"><span className="dp-agent-step-title">计划版本</span><Tag>{(detail.plans as any[]).length} 版</Tag></div>
+                  {(detail.plans as any[]).map((plan) => (
+                    <div key={`${plan.version}`} className="dp-agent-kv">
+                      <span>v{plan.version}{plan.change_reason ? ` · ${plan.change_reason}` : ''}</span>
+                      <strong>{(parseJson(plan.plan_json)?.steps ?? []).map((s: any) => s.title).join(' → ').slice(0, 120) || '—'}</strong>
+                    </div>
+                  ))}
                 </div>
-              ))}
-              {subtasks.length === 0 && <StateBlock empty emptyText={selected.status === 'Pending' ? '任务已就绪，点击开始执行生成规划' : '当前任务尚无子任务记录'}>{null}</StateBlock>}
-              {selected.result_summary && <div className="dp-agent-step"><div className="dp-agent-step-head"><span className="dp-agent-step-title">任务结果</span><StatusTag status={selected.status}/></div><pre>{selected.result_summary}</pre></div>}
+              )}
+              {selected.result_summary && <div className="dp-agent-step"><div className="dp-agent-step-head"><span className="dp-agent-step-title">任务结果与验证</span><StatusTag status={selected.status}/></div><pre>{selected.result_summary}</pre></div>}
             </div>
           </div> : <div className="dp-agent-empty"><div><div className="dp-agent-empty-mark">AI</div><Typography.Title level={4}>从一个明确目标开始</Typography.Title><p className="dp-desc">选择项目并描述任务。Supervisor 会规划步骤，执行记录将在这里呈现。</p></div></div>}
           <div className="dp-agent-composer">
@@ -1981,7 +1906,7 @@ export default function App() {
       case '6': return <LegacyFrame pageKey='6'><Logs /></LegacyFrame>;
       case '7': return <LegacyFrame pageKey='7'><Approvals /></LegacyFrame>;
       case '8': return <LegacyFrame pageKey='8'><Environments /></LegacyFrame>;
-      case '9': return <LegacyFrame pageKey='9'><Settings rerunOnboarding={rerunOnboarding} themeMode={themeMode} onThemeChange={setMode} /></LegacyFrame>;
+      case '9': return <LegacyFrame pageKey='9'><Settings rerunOnboarding={rerunOnboarding} /></LegacyFrame>;
       case '10': return <LegacyFrame pageKey='10'><GitCenter /></LegacyFrame>;
       case '12': return <LegacyFrame pageKey='12'><DatabasesCenter /></LegacyFrame>;
       case '13': return <LegacyFrame pageKey='13'><ExternalToolsPage /></LegacyFrame>;

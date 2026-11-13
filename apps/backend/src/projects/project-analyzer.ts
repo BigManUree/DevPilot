@@ -15,6 +15,8 @@ export interface ServiceDraft {
   service_type: string;
   workdir: string;
   start_command?: string;
+  /** CLI 服务的用法提示：example = 可直接复制的完整命令；note = 补充说明；args = 自动启动时附加的参数（不含占位符） */
+  usage_hint?: { example: string; note?: string; args?: string };
   build_command?: string;
   port?: number;
   depends_on?: string[];
@@ -54,9 +56,12 @@ export class ProjectAnalyzer {
 
     for (const dir of dirs) {
       const r = this.analyzeDir(dir);
-      if (r.facts.language) Object.assign(facts, r.facts, facts.language ? {} : {});
+      // 修复：先前 Object.assign 第三参恒为空对象导致子目录 facts 无条件覆盖根目录；
+      // 现改为仅当根目录尚未识别出语言时才采用子目录事实
+      if (r.facts.language && !facts.language) Object.assign(facts, r.facts);
       services.push(...r.services);
-      if (dir !== root && r.facts.language) unknowns.push(...r.unknowns);
+      // 修复：根目录自身的 unknowns 之前因 dir!==root 条件被丢弃，现全部保留
+      unknowns.push(...r.unknowns);
     }
 
     if (!facts.language) unknowns.push('未识别出语言/技术栈，需要 AI 分析或用户输入');
@@ -193,6 +198,37 @@ export class ProjectAnalyzer {
             start_command: `${prefix}streamlit run ${stEntry}`,
             port: 8501,
           });
+        }
+      }
+
+      // CLI 工具型 Python 项目（无 Web 服务入口）：打包成 Python 包、带 __main__.py，
+      // 典型如 sherlock。启动校验用 --help：exit 0 = 依赖装齐 + 入口可用；
+      // CLI 不是常驻服务，实际使用按 README 传参（如 python -m xxx <username>）。
+      if (!services.length) {
+        const cliPkg = this.pythonCliPackage(root);
+        if (cliPkg) {
+          // 已知 CLI 工具的用法提示（写入 usage_hint，展示在详情页「使用命令」并用于终端自动启动）。
+          // sherlock：站点清单在 GitHub 上，国内网络拉不动，必须加 --local 用项目自带的 data.json。
+          const CLI_HINTS: Record<string, { args: string; example: string; note: string }> = {
+            sherlock_project: {
+              args: '--local',
+              example: `python -m sherlock_project --local <用户名>`,
+              note: '在 400+ 社交网站查找用户名。--local 使用项目自带的站点清单（不访问 GitHub）；查询国外站点时请先开代理并加 --proxy 参数，如 --proxy socks5://127.0.0.1:7890。',
+            },
+          };
+          const hint = CLI_HINTS[cliPkg] ?? {
+            args: '',
+            example: `python -m ${cliPkg} <参数>`,
+            note: '实际使用参数请查看项目 README。',
+          };
+          services.push({
+            name: 'python-cli',
+            service_type: 'cli',
+            workdir: root,
+            start_command: `${prefix}python -m ${cliPkg} --help`,
+            usage_hint: hint,
+          });
+          unknowns.push(`CLI 工具型项目：启动校验用 python -m ${cliPkg} --help${hint.args ? `，使用时加 ${hint.args}` : '，实际使用按 README 传参'}`);
         }
       }
     }
@@ -358,9 +394,31 @@ export class ProjectAnalyzer {
     return null;
   }
 
+  /**
+   * CLI 工具型 Python 包识别：返回可用 `python -m <pkg>` 执行的包名，找不到返回 null。
+   * 判据：顶层非代码目录里存在 __main__.py（`python -m pkg` 的硬性要求）；
+   * pyproject.toml 的 poetry packages include / console scripts 作为兜底线索。
+   */
+  private static pythonCliPackage(root: string): string | null {
+    // 顶层包目录含 __main__.py（排除 tests/docs 等非代码目录与打包产物）
+    const NON_CODE = new Set(['tests', 'test', 'docs', 'doc', 'devel', 'examples', 'scripts', 'build', 'dist', 'src', 'resources']);
+    const dirs = fs.readdirSync(root, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && !d.name.startsWith('.') && !NON_CODE.has(d.name.toLowerCase()));
+    const withMain = dirs.find((d) => fs.existsSync(path.join(root, d.name, '__main__.py')));
+    if (withMain) return withMain.name;
+
+    // 兜底：pyproject.toml 声明的 poetry include 包
+    const pyproject = path.join(root, 'pyproject.toml');
+    if (fs.existsSync(pyproject)) {
+      const text = fs.readFileSync(pyproject, 'utf-8');
+      const inc = text.match(/packages\s*=\s*\[\s*\{\s*include\s*=\s*["']([\w.]+)["']/);
+      if (inc && fs.existsSync(path.join(root, inc[1].split('.')[0], '__main__.py'))) return inc[1].split('.')[0];
+    }
+    return null;
+  }
+
   /** 找 Streamlit 入口：root / ui / pages / app / webui / streamlit 下第一个 import streamlit 的 .py */
-  private static findStreamlitEntry(root: string): string | null {
-    const subdirs = ['', 'ui', 'pages', 'app', 'webui', 'streamlit'];
+  private static findStreamlitEntry(root: string): string | null {    const subdirs = ['', 'ui', 'pages', 'app', 'webui', 'streamlit'];
     for (const d of subdirs) {
       const dir = d ? path.join(root, d) : root;
       if (!fs.existsSync(dir)) continue;

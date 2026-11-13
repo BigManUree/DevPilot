@@ -36,6 +36,12 @@ export class AgentController {
     return this.agents.list();
   }
 
+  /** 工具注册中心清单（前端展示 + 审批规则可视化） */
+  @Get('tools')
+  listTools() {
+    return this.agents.listTools();
+  }
+
   // ---- 任务 ----
   @Post('tasks')
   createTask(@Body() body: { goal: string; projectId?: string }) {

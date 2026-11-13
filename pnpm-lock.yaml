@@ -189,6 +189,9 @@ importers:
       '@nestjs/websockets':
         specifier: ^10.4.0
         version: 10.4.22(@nestjs/common@10.4.22(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@10.4.22)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      adm-zip:
+        specifier: ^0.6.1
+        version: 0.6.1
       better-sqlite3:
         specifier: ^11.3.0
         version: 11.10.0
@@ -1565,6 +1568,10 @@ packages:
     resolution: {integrity: sha512-oJlA3XiRm7Cyk6qFD2Jn8ak9B7jSy0qy00ADO3+8dpT0LSjFihQYv4C02LFCSYJV3Q37xYwwRy5m+IpIiUzqWw==}
     engines: {node: '>=0.4.0'}
     hasBin: true
+
+  adm-zip@0.6.1:
+    resolution: {integrity: sha512-Xwrja8nx9e5o2N1my4DsKCeKpdrnACyr1wtbPxBDgGzKzKyE9kRtBFA8mWldI+RVlD7CBZNWY/wQ2+ydwOR6kQ==}
+    engines: {node: '>=14.0'}
 
   agent-base@6.0.2:
     resolution: {integrity: sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ==}
@@ -5867,6 +5874,8 @@ snapshots:
       negotiator: 0.6.3
 
   acorn@8.19.0: {}
+
+  adm-zip@0.6.1: {}
 
   agent-base@6.0.2(supports-color@8.1.1):
     dependencies:

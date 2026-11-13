@@ -503,7 +503,149 @@ const V9: Migration = {
   },
 };
 
-export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5, V6, V7, V8, V9];
+/** V11：CLI 服务用法提示（example/note/args JSON），展示在详情页并用于终端自动启动 */
+const V11: Migration = {
+  version: 11,
+  name: 'service-usage-hint',
+  up: (db) => {
+    db.exec(`ALTER TABLE project_services ADD COLUMN usage_hint TEXT;`);
+  },
+};
+
+/** V10：项目简介（导入时 Agent 扫描项目生成的一句话描述，展示在项目卡片） */
+const V10: Migration = {
+  version: 10,
+  name: 'project-description',
+  up: (db) => {
+    db.exec(`ALTER TABLE projects ADD COLUMN description TEXT;`);
+  },
+};
+
+/** V12：智能化升级——项目分析档案（组件树+指纹）与来源信息 */
+const V12: Migration = {
+  version: 12,
+  name: 'project-profile-and-source',
+  up: (db) => {
+    db.exec(`ALTER TABLE projects ADD COLUMN components_json TEXT;`);
+    db.exec(`ALTER TABLE projects ADD COLUMN profile_hash TEXT;`);
+    db.exec(`ALTER TABLE projects ADD COLUMN source_json TEXT;`);
+  },
+};
+
+/** V13：统一导入任务表（真实进度/取消/失败清理追踪） */
+const V13: Migration = {
+  version: 13,
+  name: 'import-jobs',
+  up: (db) => {
+    db.exec(`CREATE TABLE IF NOT EXISTS import_jobs (
+      id TEXT PRIMARY KEY,
+      source TEXT NOT NULL,
+      source_ref TEXT NOT NULL,
+      project_id TEXT,
+      status TEXT NOT NULL DEFAULT 'queued',
+      phase TEXT NOT NULL DEFAULT 'queued',
+      percent INTEGER NOT NULL DEFAULT 0,
+      message TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT,
+      finished_at TEXT
+    )`);
+  },
+};
+
+/** V14：Agent 计划版本历史（版本化重规划：每次计划变更落一条） */
+const V14: Migration = {
+  version: 14,
+  name: 'task-plan-versions',
+  up: (db) => {
+    db.exec(`CREATE TABLE IF NOT EXISTS task_plan_versions (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      plan_json TEXT NOT NULL,
+      change_reason TEXT,
+      created_at TEXT NOT NULL
+    )`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_task_plan_versions_task ON task_plan_versions(task_id, version)`);
+  },
+};
+
+/** V15：错误知识库（错误特征 → 已验证解决方案，含成功率统计） */
+const V15: Migration = {
+  version: 15,
+  name: 'error-patterns',
+  up: (db) => {
+    db.exec(`CREATE TABLE IF NOT EXISTS error_patterns (
+      id TEXT PRIMARY KEY,
+      category TEXT NOT NULL,
+      pattern TEXT NOT NULL,
+      scope TEXT,
+      summary TEXT NOT NULL,
+      solution TEXT NOT NULL,
+      risk TEXT NOT NULL DEFAULT 'L2',
+      verified INTEGER NOT NULL DEFAULT 0,
+      success_count INTEGER NOT NULL DEFAULT 0,
+      fail_count INTEGER NOT NULL DEFAULT 0,
+      source_task TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT
+    )`);
+  },
+};
+
+/** V16：修复记录（统一诊断/修复闭环：分类→方案→审批→执行→验证→结果） */
+const V16: Migration = {
+  version: 16,
+  name: 'repair-records-v2',
+  up: (db) => {
+    db.exec(`CREATE TABLE IF NOT EXISTS repair_records_v2 (
+      id TEXT PRIMARY KEY,
+      task_id TEXT,
+      project_id TEXT,
+      service_id TEXT,
+      category TEXT,
+      confidence REAL,
+      evidence_json TEXT,
+      proposal_json TEXT,
+      risk TEXT,
+      approval_id TEXT,
+      applied_files_json TEXT,
+      ran_commands_json TEXT,
+      verify_command TEXT,
+      verify_result TEXT,
+      outcome TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      finished_at TEXT
+    )`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_repairs_v2_project ON repair_records_v2(project_id, created_at)`);
+  },
+};
+
+/** V17：运行档案（项目运行/验证结果持久化，供复用与经验沉淀） */
+const V17: Migration = {
+  version: 17,
+  name: 'run-archives',
+  up: (db) => {
+    db.exec(`CREATE TABLE IF NOT EXISTS run_archives (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      profile_hash TEXT,
+      run_kind TEXT NOT NULL,
+      command TEXT,
+      port INTEGER,
+      pid INTEGER,
+      status TEXT,
+      health_json TEXT,
+      summary TEXT,
+      created_at TEXT NOT NULL
+    )`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_run_archives_project ON run_archives(project_id, created_at)`);
+  },
+};
+
+export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17];
 
 export function openDatabase(dataDir: string): Database.Database {
   fs.mkdirSync(dataDir, { recursive: true });

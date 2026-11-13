@@ -53,6 +53,12 @@ export class RuntimeController {
     return this.svc.detectAccessUrl(serviceId);
   }
 
+  /** 为 CLI 型服务打开可见的命令行窗口（用户直接使用 CLI 项目） */
+  @Post('services/:serviceId/terminal')
+  openTerminal(@Param('serviceId') serviceId: string) {
+    return this.svc.openTerminal(serviceId);
+  }
+
   @Post('projects/:projectId/start')
   startProject(@Param('projectId') projectId: string) {
     return this.svc.startProject(projectId);

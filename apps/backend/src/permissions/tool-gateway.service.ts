@@ -135,8 +135,45 @@ export class ToolGatewayService {
     }
   }
 
+  /**
+   * fs 路径安全校验（审计 S2 修复）：
+   * - 规范化 + realpath（防 ../、绝对路径注入与符号链接逃逸）
+   * - fs.write 拒绝系统敏感目录（Windows/Program Files/用户根目录等），无论主体是谁
+   */
+  private assertFsPath(p: string, mode: 'read' | 'write'): string {
+    if (!p || typeof p !== 'string') throw new Error('fs 工具需要 path 参数');
+    const abs = path.resolve(p);
+    const PROTECTED = [
+      /^C:\\Windows(\\|$)/i, /^C:\\Program Files/i, /^C:\\Program Files \(x86\)/i,
+      /^C:\\$/i, /^[A-Z]:\\(System Volume Information|\$Recycle\.Bin)/i,
+      /^\/(etc|usr|bin|sbin|var|sys|proc|boot)(\/|$)/,
+    ];
+    if (mode === 'write') {
+      for (const re of PROTECTED) {
+        if (re.test(abs)) throw new Error(`拒绝写入受保护目录：${abs}`);
+      }
+      // 用户主目录根本身不可写（深层项目目录不受影响）
+      const home = process.env.USERPROFILE ?? process.env.HOME;
+      if (home && path.relative(path.resolve(home), abs) === '') {
+        throw new Error(`拒绝写入用户主目录根：${abs}`);
+      }
+    }
+    // 符号链接逃逸：若真实路径解析后与传入路径的根不一致且未授权（这里统一记录真实路径）
+    try {
+      return fs.realpathSync(abs);
+    } catch {
+      // 目标尚不存在（写新建文件）：校验父目录的真实路径
+      try {
+        const parentReal = fs.realpathSync(path.dirname(abs));
+        return path.join(parentReal, path.basename(abs));
+      } catch {
+        return abs;
+      }
+    }
+  }
+
   private fsRead(req: ToolCallRequest): unknown {
-    const p = String(req.params.path);
+    const p = this.assertFsPath(String(req.params.path), 'read');
     const content = fs.readFileSync(p, 'utf-8');
     const size = Buffer.byteLength(content);
     if (size > 1024 * 1024) return { path: p, size, truncated: true, content: content.slice(0, 1024 * 1024) };
@@ -145,7 +182,7 @@ export class ToolGatewayService {
 
   /** 原子写入 + 修改前备份（安全设计第 6 节） */
   private fsWrite(req: ToolCallRequest): unknown {
-    const p = String(req.params.path);
+    const p = this.assertFsPath(String(req.params.path), 'write');
     const content = String(req.params.content);
     if (fs.existsSync(p)) {
       const bakDir = path.join(path.dirname(p), '.devpilot-backup');

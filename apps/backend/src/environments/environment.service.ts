@@ -104,4 +104,142 @@ export class EnvironmentService {
       sock.once('error', () => resolve(false));
     });
   }
+
+  // ============ 智能化升级（多版本 / 匹配 / 外部服务 / 环境变量） ============
+
+  /** 多版本扫描：node/java/python/maven/gradle/go/rust/php/docker */
+  async scanAllVersions() {
+    const { scanAllVersions } = await import('./version-scan');
+    return scanAllVersions();
+  }
+
+  /** 项目要求 vs 本机多版本匹配（约束来自组件树档案 runtime.languageVersion） */
+  async matchProject(projectId: string) {
+    const { matchRequirement } = await import('./version-scan');
+    const profile = this.getProfile(projectId);
+    if (!profile?.components?.length) return { projectId, matches: [], note: '项目尚无组件树档案，请先重新分析' };
+
+    // 按 componentId 去重的语言版本约束
+    const reqs: Array<{ componentId: string; componentName: string; toolId: string; requirement: string | null; source: string | null }> = [];
+    for (const comp of profile.components) {
+      const rt = comp.runtime;
+      if (!rt?.languageVersion) continue;
+      const map: Record<string, string> = { java: 'java', javascript: 'node', typescript: 'node', python: 'python', go: 'go', rust: 'rust', php: 'php' };
+      const toolId = map[comp.language ?? ''];
+      if (!toolId) continue;
+      reqs.push({ componentId: comp.id, componentName: comp.name, toolId, requirement: rt.languageVersion, source: rt.languageVersionSource });
+    }
+    // gradle 约束
+    for (const comp of profile.components) {
+      if (comp.packageManager === 'gradle' && comp.runtime?.packageManagerVersion) {
+        reqs.push({ componentId: comp.id, componentName: comp.name, toolId: 'gradle', requirement: comp.runtime.packageManagerVersion, source: comp.runtime.languageVersionSource });
+      }
+    }
+
+    const matches = [];
+    for (const r of reqs) {
+      const m = await matchRequirement(r.toolId, r.requirement, r.source);
+      matches.push({ component: { id: r.componentId, name: r.componentName }, ...m });
+    }
+    const overall = matches.some((m) => m.status === 'missing') ? 'missing' : matches.some((m) => m.status === 'mismatch') ? 'mismatch' : matches.length ? 'ready' : 'no-constraints';
+    return { projectId, overall, matches };
+  }
+
+  /** 外部服务探活：组件档案中的 externalServices + compose 服务 */
+  async checkExternalServices(projectId: string) {
+    const { execFile } = await import('node:child_process');
+    const profile = this.getProfile(projectId);
+    const seen = new Map<string, { type: string; port: number | null; source: string }>();
+    for (const comp of profile?.components ?? []) {
+      for (const svc of comp.runtime?.externalServices ?? []) {
+        if (svc.type === 'unknown') continue;
+        const key = `${svc.type}:${svc.port ?? ''}`;
+        if (!seen.has(key)) seen.set(key, { type: svc.type, port: svc.port, source: `${comp.name}: ${svc.source}` });
+      }
+    }
+
+    const results = [];
+    for (const svc of seen.values()) {
+      if (!svc.port) continue;
+      const open = await this.portOccupied(svc.port, 1500);
+      // 占用时进一步识别监听进程（Windows netstat）
+      let processName: string | null = null;
+      if (open && process.platform === 'win32') {
+        processName = await new Promise<string | null>((resolve) => {
+          execFile('powershell.exe', ['-NoProfile', '-Command', `Get-NetTCPConnection -LocalPort ${svc.port} -State Listen | Select-Object -First 1 -ExpandProperty OwningProcess | ForEach-Object { (Get-Process -Id $_).ProcessName }`], { timeout: 8000, windowsHide: true }, (err, stdout) => resolve(err ? null : stdout.trim() || null));
+        });
+      }
+      results.push({
+        type: svc.type,
+        port: svc.port,
+        listening: open,
+        processName,
+        status: open ? 'running' : 'not-running',
+        source: svc.source,
+        advice: open ? `${svc.type} 在端口 ${svc.port} 可达${processName ? `（进程 ${processName}）` : ''}。` : `${svc.type} 未在端口 ${svc.port} 监听。可安装/启动该服务，或使用 Docker 启动（需用户确认）。`,
+      });
+    }
+    return { projectId, services: results, overall: results.every((r) => r.listening) ? 'ready' : results.length ? 'action-needed' : 'no-external-services' };
+  }
+
+  /** 环境变量检查：档案 envVars vs 项目根 .env 实际内容 */
+  async checkEnvVars(projectId: string) {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const profile = this.getProfile(projectId);
+    const project = this.ds.db.prepare('SELECT root_path, env_json FROM projects WHERE id = ?').get(projectId) as { root_path: string; env_json: string | null } | undefined;
+    if (!project) throw new Error('project not found');
+    const profile2 = profile as unknown as { components: Array<{ name: string; path: string; runtime: { envVars: Array<{ key: string; source: string; required: boolean; hasDefault: boolean; sensitive: boolean; defaultValue?: string }> } | null }> | undefined };
+    const required: Array<{ key: string; source: string; component: string; hasDefault: boolean; sensitive: boolean }> = [];
+    for (const comp of profile2?.components ?? []) {
+      for (const v of comp.runtime?.envVars ?? []) {
+        required.push({ key: v.key, source: v.source, component: comp.name, hasDefault: v.hasDefault, sensitive: v.sensitive });
+      }
+    }
+    if (!required.length) return { projectId, vars: [], missing: [], overall: 'no-requirements' };
+
+    // 已有值：项目根各组件目录下的 .env
+    const values = new Map<string, string>();
+    const envPath = path.join(project.root_path, '.env');
+    if (fs.existsSync(envPath)) {
+      for (const line of fs.readFileSync(envPath, 'utf-8').split(/\r?\n/)) {
+        const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(.*)$/);
+        if (m) values.set(m[1], m[2]);
+      }
+    }
+    const results = required.map((r) => {
+      const inDotEnv = values.has(r.key);
+      const inSystem = !!process.env[r.key];
+      return {
+        key: r.key,
+        component: r.component,
+        source: r.source,
+        sensitive: r.sensitive,
+        provided: inDotEnv || inSystem,
+        where: inDotEnv ? '.env' : inSystem ? 'system-env' : null,
+        hasDefault: r.hasDefault,
+        // 不回显敏感值
+        status: inDotEnv || inSystem ? 'provided' : r.hasDefault ? 'default-available' : 'missing',
+      };
+    });
+    const missing = results.filter((r) => r.status === 'missing');
+    return {
+      projectId,
+      vars: results,
+      missing,
+      overall: missing.length ? 'missing' : 'ready',
+      note: missing.length ? `缺失 ${missing.length} 个必填环境变量（不自动生成密钥，请在配置向导中填写）` : null,
+    };
+  }
+
+  /** 读取项目组件树档案 */
+  private getProfile(projectId: string): { components: Array<{ id: string; name: string; path: string; language: string | null; packageManager: string | null; runtime: { languageVersion: string | null; languageVersionSource: string | null; packageManagerVersion: string | null; envVars: Array<{ key: string; source: string; required: boolean; hasDefault: boolean; sensitive: boolean; defaultValue?: string }>; externalServices: Array<{ type: string; host: string | null; port: number | null; source: string }> } | null }> } | null {
+    const row = this.ds.db.prepare('SELECT components_json FROM projects WHERE id = ?').get(projectId) as { components_json: string | null } | undefined;
+    if (!row?.components_json) return null;
+    try {
+      return JSON.parse(row.components_json);
+    } catch {
+      return null;
+    }
+  }
 }

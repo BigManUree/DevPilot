@@ -69,7 +69,9 @@ export class GitService {
   }
 
   async status(repoPath: string) {
-    if (!this.isRepo(repoPath)) throw new Error('not a git repository');
+    // 前端对每个项目轮询 status：非 git 仓库（如纯脚本项目）返回 isRepo:false，
+    // 不抛异常——旧实现每 8 秒刷一条 ERROR 堆栈进日志，纯噪音。
+    if (!this.isRepo(repoPath)) return { isRepo: false, branch: null, aheadBehind: [], clean: true, files: [], recentCommits: [] };
     const [st, br, log] = await Promise.all([
       this.run(repoPath, ['status', '--porcelain=v1', '-b']),
       this.run(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']),

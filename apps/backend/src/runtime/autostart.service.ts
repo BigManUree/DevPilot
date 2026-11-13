@@ -18,7 +18,7 @@ import { detectLaunchScript } from '../projects/launch-script';
  *  4. 成功 → 状态 Running + 通知「项目已成功启动」；失败 → 明确写出三次尝试都做了什么。
  */
 
-export type AutoStartPhase = 'detect' | 'start' | 'repair' | 'retry' | 'done' | 'failed';
+export type AutoStartPhase = 'detect' | 'start' | 'verify' | 'repair' | 'retry' | 'done' | 'failed';
 
 export interface AutoStartStep {
   at: string;
@@ -125,6 +125,27 @@ export class AutoStartService {
     const list = this.allServices(project.id);
     if (!list.length) throw new Error('创建服务配置失败');
 
+    // 依赖预检（确定性，不依赖模型）：node 项目 node_modules 缺失时先安装依赖，
+    // 避免「代码没问题却因为没装依赖起不来」这种最常见的一键启动失败。
+    if (!isBinary) {
+      try {
+        const installed = await this.fixer.ensureNodeDeps({ projectId: project.id, rootPath: root, projectName: project.name });
+        if (installed) this.step(job, 'detect', '检测到 node 项目的 node_modules 缺失，已自动安装依赖');
+      } catch (e) {
+        this.step(job, 'detect', `依赖预检失败（不阻断启动，失败会进入自动修复）：${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      }
+      // Python 项目依赖预检：没有虚拟环境就建 .venv 并安装依赖（确定性，不依赖模型）
+      const isPython = project.language === 'python' || fs.existsSync(path.join(root, 'pyproject.toml')) || fs.existsSync(path.join(root, 'requirements.txt'));
+      if (isPython) {
+        try {
+          const installed = await this.fixer.ensurePythonDeps({ projectId: project.id, rootPath: root, projectName: project.name });
+          if (installed) this.step(job, 'detect', '检测到 python 项目缺少虚拟环境，已创建 .venv 并安装依赖');
+        } catch (e) {
+          this.step(job, 'detect', `python 依赖预检失败（不阻断启动，失败会进入自动修复）：${String((e as Error)?.message ?? e).slice(0, 200)}`);
+        }
+      }
+    }
+
     // 多服务项目（前后端分层等）：按依赖顺序逐个启动，不套用单一启动脚本——
     // 根目录脚本通常只覆盖一个服务，按服务各自的启动命令更精确。
     if (list.length > 1) {
@@ -192,6 +213,7 @@ export class AutoStartService {
 
         let r: Awaited<ReturnType<RuntimeService['startService']>> | null = null;
         let startError: string | null = null;
+        let verifyFailed = false;
         try {
           r = await this.runtime.startService(svc.id);
         } catch (e) {
@@ -199,15 +221,43 @@ export class AutoStartService {
           startError = String((e as Error)?.message ?? e);
         }
 
-        if (r?.status === 'Running') {
+        if (r?.status === 'Stopped' && !cur.port) {
+          // CLI 工具型服务：一次性命令 exit 0 = 启动校验通过（依赖齐、入口可用）。
+          // 校验通过立即为用户打开可用的命令行窗口——CLI 项目的"启动成功"就是能直接用。
+          let terminalNote = '';
+          try {
+            await this.runtime.openTerminal(svc.id);
+            terminalNote = '，已自动打开命令行窗口';
+          } catch (e) {
+            terminalNote = `，命令行窗口打开失败（${String((e as Error)?.message ?? e).slice(0, 80)}），可在详情里点「打开终端」重试`;
+          }
           ok = true;
-          results.push(`✓ ${svc.name}：${cmd}${cur.port ? `（端口 ${cur.port}）` : ''}${r.adopted ? '，接管已有实例' : ''}`);
-          this.step(job, 'done', `${svc.name} 启动成功${cur.port ? `，端口 ${cur.port}` : ''}`);
+          results.push(`✓ ${svc.name}：CLI 启动校验通过（${cmd}，exit 0）${terminalNote}`);
+          this.step(job, 'done', `${svc.name} CLI 启动校验通过${terminalNote}，直接在弹出的窗口里使用本项目`);
           break;
         }
 
-        lastLog = startError ?? this.collectLogs(svc.name, r!.status, attemptStartedAt);
-        this.step(job, 'repair', `${svc.name} 第 ${attempt} 次启动失败（${startError ? `异常：${startError}` : r!.status}），交给 Agent 修复`, lastLog.slice(0, 600));
+        if (r?.status === 'Running') {
+          // 端口监听 ≠ 启动成功：做真实健康校验（页面模块能否编译、有无报错日志）。
+          // vite「Failed to resolve import」这类错误曾经被误报成启动成功。
+          const verify = await this.verifyRunning(svc.name, cur.port, attemptStartedAt);
+          if (verify.ok) {
+            ok = true;
+            results.push(`✓ ${svc.name}：${cmd}${cur.port ? `（端口 ${cur.port}）` : ''}${r.adopted ? '，接管已有实例' : ''}`);
+            this.step(job, 'done', `${svc.name} 启动成功${cur.port ? `，端口 ${cur.port}（健康校验通过）` : '（健康校验通过）'}`);
+            break;
+          }
+          verifyFailed = true;
+          lastLog = verify.detail;
+          this.step(job, 'verify', `${svc.name} 端口已监听，但健康校验未通过（服务实际不可用），判定为本次启动失败`, verify.detail.slice(0, 800));
+        }
+
+        if (!verifyFailed) {
+          lastLog = startError ?? this.collectLogs(svc.name, r!.status, attemptStartedAt);
+          this.step(job, 'repair', `${svc.name} 第 ${attempt} 次启动失败（${startError ? `异常：${startError}` : r!.status}），交给 Agent 修复`, lastLog.slice(0, 600));
+        } else {
+          this.step(job, 'repair', `${svc.name} 第 ${attempt} 次启动失败（健康校验未通过），交给 Agent 修复`, lastLog.slice(0, 600));
+        }
         if (attempt === job.maxAttempts) break;
 
         const fix = await this.fixer.fix({
@@ -331,30 +381,68 @@ export class AutoStartService {
 
       let r: Awaited<ReturnType<RuntimeService['startService']>> | null = null;
       let startError: string | null = null;
+      let verifyFailed = false;
+      let verifyDetail = '';
       try {
         r = await this.runtime.startService(svc.id);
       } catch (e) {
         startError = String((e as Error)?.message ?? e);
       }
-      if (r?.status === 'Running') {
+      const cliDone = r?.status === 'Stopped' && !cur.port;
+      if (cliDone) {
+        // CLI 工具型项目：一次性命令 exit 0 = 启动校验通过（依赖装齐 + 入口可用）。
+        // 校验通过立即为用户打开可用的命令行窗口。
+        let terminalNote = '';
+        try {
+          await this.runtime.openTerminal(svc.id);
+          terminalNote = '已自动打开命令行窗口并启动程序（虚拟环境已激活），窗口保持可用，直接在里面使用本项目。';
+        } catch (e) {
+          terminalNote = `命令行窗口打开失败（${String((e as Error)?.message ?? e).slice(0, 80)}），可在项目详情里点「打开终端」重试。`;
+        }
         job.status = 'Success';
         job.finishedAt = new Date().toISOString();
-        job.pid = r.pid;
-        job.report = `启动成功${r.adopted ? '（接管已在运行的实例）' : ''}：${cur.start_command}${cur.port ? `，端口 ${cur.port}` : ''}`;
+        job.pid = r!.pid;
+        job.report = `CLI 项目启动校验通过：${cur.start_command} 执行成功（exit 0）。${terminalNote}`;
         this.step(job, 'done', job.report);
         this.notify.create({
           type: 'project.autostart.ok',
-          title: `项目 ${project.name} 已成功启动`,
+          title: `项目 ${project.name} 启动校验通过`,
           content: job.report,
           priority: 4,
           projectId: project.id,
         });
         return;
       }
+      if (r?.status === 'Running') {
+        // 端口监听 ≠ 启动成功：真实健康校验。vite dev server 端口起来但模块编译
+        // 失败（如缺 @tauri-apps/api）时，页面访问是报错页，必须判失败进修复循环。
+        const verify = await this.verifyRunning(svc.name, cur.port, attemptStartedAt);
+        if (verify.ok) {
+          job.status = 'Success';
+          job.finishedAt = new Date().toISOString();
+          job.pid = r.pid;
+          job.report = `启动成功（健康校验通过）${r.adopted ? '（接管已在运行的实例）' : ''}：${cur.start_command}${cur.port ? `，端口 ${cur.port}` : ''}`;
+          this.step(job, 'done', job.report);
+          this.notify.create({
+            type: 'project.autostart.ok',
+            title: `项目 ${project.name} 已成功启动`,
+            content: job.report,
+            priority: 4,
+            projectId: project.id,
+          });
+          return;
+        }
+        verifyFailed = true;
+        verifyDetail = verify.detail;
+      }
 
       // 失败：抓日志 → Agent 修复
-      const logText = startError ?? this.collectLogs(svc.name, r!.status, attemptStartedAt);
-      this.step(job, 'repair', `第 ${attempt} 次启动失败（${startError ? `异常：${startError}` : r!.status}），抓取日志交给 Agent 修复`, logText.slice(0, 800));
+      const logText = verifyFailed
+        ? verifyDetail
+        : (startError ?? this.collectLogs(svc.name, r!.status, attemptStartedAt));
+      this.step(job, verifyFailed ? 'verify' : 'repair', verifyFailed
+        ? `第 ${attempt} 次启动端口已监听，但健康校验未通过（服务实际不可用），判定为失败并进入修复`
+        : `第 ${attempt} 次启动失败（${startError ? `异常：${startError}` : r!.status}），抓取日志交给 Agent 修复`, logText.slice(0, 800));
       if (attempt === job.maxAttempts) {
         job.status = 'Failed';
         job.finishedAt = new Date().toISOString();
@@ -394,6 +482,77 @@ export class AutoStartService {
       job.report = job.report ?? '自动启动未完成（启动命令缺失或全部尝试失败）';
       this.step(job, 'failed', job.report);
     }
+  }
+
+  /**
+   * 启动后健康校验（核心反"假成功"机制）：
+   * 端口监听只说明 dev server 进程起来了，不代表页面真的能用。
+   * 校验手段：
+   *  1) 采集启动后窗口期内的 [ERROR]/[FATAL] 日志（vite 预转换错误等都会落在这里）；
+   *  2) 对有端口的服务：请求根路径，若是 HTML 则解析 <script src> 入口模块并逐个请求，
+   *     模块编译失败（依赖缺失 / 语法错误）时 dev server 会返回 5xx——这是客观信号。
+   * 任一手段发现真实错误 → 判定启动失败，进入修复循环。
+   * 校验只在"发现明确错误"时判失败：应用能正常服务却打了一些无害 error 日志不会被误杀。
+   */
+  private async verifyRunning(serviceName: string, port: number | null, sinceIso: string): Promise<{ ok: boolean; detail: string }> {
+    // 留出窗口期：让 dev server 完成 warmup / 让应用写出启动期错误日志
+    await new Promise((r) => setTimeout(r, 4000));
+
+    const problems: string[] = [];
+
+    // 1) 窗口期 ERROR 日志（只采集本次启动之后的行，避免旧日志污染）
+    try {
+      const tail = this.logs.tail(`service.${serviceName}`, 200);
+      const errorLines = tail
+        .split(/\r?\n/)
+        .map((line) => {
+          const m = line.match(/^\[([^\]]+)\]\s*\[(ERROR|FATAL)\]\s*(.*)$/i);
+          return m && m[1] >= sinceIso ? m[3] : null;
+        })
+        .filter((x): x is string => !!x);
+      if (errorLines.length) problems.push(`启动窗口期捕获 ${errorLines.length} 条错误日志：\n${errorLines.slice(0, 8).join('\n')}`);
+    } catch { /* 日志读不到不阻断 */ }
+
+    // 2) 端口服务：探测 HTML 入口模块能否真正编译
+    if (port) {
+      const probeFail = await this.probeEntryModules(port);
+      if (probeFail) problems.push(probeFail);
+    }
+
+    return { ok: problems.length === 0, detail: problems.join('\n\n') };
+  }
+
+  /** 请求 / 页面，解析其中的 <script src> 模块并逐个请求；任一模块 5xx → 返回失败描述，否则 null */
+  private async probeEntryModules(port: number): Promise<string | null> {
+    const base = `http://127.0.0.1:${port}`;
+    let html: string;
+    try {
+      const res = await fetch(`${base}/`, {
+        signal: AbortSignal.timeout(5000),
+        headers: { 'User-Agent': 'DevPilot-probe', Accept: 'text/html' },
+      });
+      if (res.status >= 500) return `GET / 返回 HTTP ${res.status}，服务端异常`;
+      const ct = res.headers.get('content-type') ?? '';
+      if (!ct.includes('text/html')) return null; // 非 HTML 服务（API 等）不做模块探测
+      html = await res.text();
+    } catch {
+      return null; // 网络抖动不作为失败依据（端口探活已在 runtime 里通过）
+    }
+
+    const srcs = [...html.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]).slice(0, 8);
+    for (const src of srcs) {
+      let u: URL;
+      try { u = new URL(src, base); } catch { continue; }
+      if (u.origin !== base) continue; // 跳过 CDN / 外部脚本
+      try {
+        const r2 = await fetch(u, { signal: AbortSignal.timeout(8000), headers: { 'User-Agent': 'DevPilot-probe' } });
+        if (r2.status >= 500) {
+          const body = (await r2.text()).slice(0, 600);
+          return `入口模块 ${src} 返回 HTTP ${r2.status}（依赖缺失或编译错误）：\n${body}`;
+        }
+      } catch { /* 单个模块请求失败不判死，以下一个为准 */ }
+    }
+    return null;
   }
 
   /**

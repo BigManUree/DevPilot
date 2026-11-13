@@ -1,5 +1,7 @@
 import { Injectable, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { spawn, execFile, ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import net from 'node:net';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -155,6 +157,76 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     return { accessPath, url: `http://127.0.0.1:${svc.port}${accessPath === '/' ? '' : accessPath}` };
   }
 
+  /**
+   * 为 CLI 型服务打开一个可见的命令行窗口（用户直接使用 CLI 项目）：
+   * 在服务工作目录写 .devpilot/terminal.bat（激活 .venv + 打印用法提示），
+   * 用 start 在新控制台窗口运行，窗口最后保留交互 shell。
+   * CLI 项目不是常驻服务，启动校验通过后「能用的形态」就是这个窗口。
+   */
+  async openTerminal(serviceId: string): Promise<{ opened: boolean; script: string }> {
+    const svc = this.ds.db.prepare('SELECT * FROM project_services WHERE id = ?').get(serviceId) as
+      | { id: string; project_id: string; name: string; workdir: string; start_command: string | null; usage_hint?: string | null }
+      | undefined;
+    if (!svc) throw new Error('service not found');
+    if (process.platform !== 'win32') throw new Error('命令行窗口功能目前仅支持 Windows');
+
+    // 用法提示（分析器生成）：args 附加到自动运行的命令（如 sherlock 的 --local），
+    // example 是含 <占位符> 的完整示例，展示给用户。
+    let hintArgs = '';
+    let hintExample = '';
+    let hintNote = '';
+    if (svc.usage_hint) {
+      try {
+        const hint = JSON.parse(svc.usage_hint) as { example?: string; note?: string; args?: string };
+        hintArgs = (hint.args ?? '').trim();
+        hintExample = (hint.example ?? '').trim();
+        hintNote = (hint.note ?? '').trim();
+      } catch { /* 损坏的 JSON 当没有提示处理 */ }
+    }
+
+    const dir = path.join(svc.workdir, '.devpilot');
+    fs.mkdirSync(dir, { recursive: true });
+    // 真实启动命令：--help 只是启动校验用的冒烟参数，实际使用要去掉；有用法提示时自动附加 args
+    const baseCmd = (svc.start_command ?? '').replace(/\s+--help\s*$/i, '').trim();
+    const runCmd = [baseCmd, hintArgs].filter(Boolean).join(' ');
+    const hasVenv = fs.existsSync(path.join(svc.workdir, '.venv', 'Scripts', 'activate.bat'));
+    const bat = [
+      '@echo off',
+      'chcp 65001 >nul',
+      `title DevPilot - ${svc.name}`,
+      `cd /d "${svc.workdir}"`,
+      hasVenv ? 'call ".venv\\Scripts\\activate.bat"' : 'rem 项目无 .venv，使用系统解释器',
+      `echo [DevPilot] ${svc.name} 环境已就绪${hasVenv ? '（.venv 虚拟环境已激活）' : ''}`,
+      `echo [DevPilot] 正在启动程序：${runCmd || baseCmd || svc.name}`,
+      hintExample ? `echo [DevPilot] 完整用法：${hintExample}` : null,
+      hintNote ? `echo [DevPilot] ${hintNote}` : null,
+      `echo [DevPilot] 需要参数时（如指定目标），等它退出后直接在下面输入命令传参运行。`,
+      'echo.',
+      runCmd || baseCmd || `echo [DevPilot] 该服务没有启动命令，可直接在此使用项目。`,
+      'echo.',
+      `echo [DevPilot] 程序已退出（退出码 %errorlevel%）。窗口保持可用：可直接输入命令继续使用，或查看项目 README 了解参数。`,
+      'cmd /k',
+    ].filter((l) => l !== null).join('\r\n');
+    const batPath = path.join(dir, 'terminal.bat');
+    fs.writeFileSync(batPath, bat, 'utf-8');
+
+    // start 在新控制台窗口运行 bat；windowsVerbatimArguments 让引号按字面传递
+    const child = spawn('cmd.exe', ['/c', `start "" "${batPath}"`], {
+      cwd: svc.workdir,
+      detached: true,
+      stdio: 'ignore',
+      windowsVerbatimArguments: true,
+    });
+    child.unref();
+    this.logs.log({
+      level: 'info',
+      sourceModule: `service.${svc.name}`,
+      projectId: svc.project_id,
+      message: `已打开命令行窗口并自动启动程序（${runCmd || baseCmd || '无启动命令'}），窗口保留供交互使用`,
+    });
+    return { opened: true, script: batPath };
+  }
+
   /** 扫服务日志尾部，找 http://127.0.0.1:<port>/<path> 或 http://localhost:<port>/<path>，取最后一次出现的非根路径 */
   private accessPathFromLogs(port: number, svcName: string): string | null {
     try {
@@ -234,7 +306,8 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       const occupied = await this.portListening(svc.port);
       if (occupied) {
         const pid = await this.findListenerPid(svc.port);
-        const httpOk = await this.httpProbe(svc.port, this.healthPath(svc));
+        const hc = this.healthConfig(svc);
+        const httpOk = await this.httpProbe(svc.port, hc.path, hc.expectedStatus, hc.method);
         if (httpOk) {
           const sid = sessionId ?? randomUUID();
           this.tracked.set(serviceId, { serviceId, sessionId: sid, child: null, pid, adopted: true, startedAt: Date.now() });
@@ -318,14 +391,15 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       }
     });
 
-    // 健康检查：有端口走 TCP 探活（25s 覆盖 streamlit / vite 这类冷启动较慢的服务）；
-    // 无端口服务也要做最小存活检测——秒退（入口文件不存在等）曾被直接记为「启动成功」，
-    // 导致修复循环永远不触发。3s 后进程还活着才算成功。
+    // 健康检查：有端口走 TCP 探活（60s 覆盖 streamlit / vite 这类冷启动较慢的服务）；
+    // 无端口服务（CLI 工具 / 脚本）：退出码 0 = 一次性执行成功（启动校验通过）；
+    // 窗口期内仍存活 = 常驻程序，也算成功。秒退且非 0 才是失败（入口/依赖问题）。
+    let cliExitCode: number | null | undefined;
     const healthy = svc.port
       ? await this.waitPort(svc.port, 60000)
       : await new Promise<boolean>((resolve) => {
-          const t = setTimeout(() => resolve(child.exitCode === null && child.signalCode === null), 3000);
-          child.once('exit', () => { clearTimeout(t); resolve(false); });
+          const t = setTimeout(() => resolve(child.exitCode === null && child.signalCode === null), 8000);
+          child.once('exit', (code) => { clearTimeout(t); cliExitCode = code; resolve(code === 0); });
         });
     if (!healthy) {
       // 进程已经退出时不能标 Unhealthy：那是崩溃（Failed），否则会被上层误判成"还在跑但没监听"
@@ -334,7 +408,9 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
         this.broadcastServiceEvent(serviceId, svc.project_id);
         this.logs.log({
           level: 'error', sourceModule: `service.${svc.name}`, projectId: svc.project_id,
-          message: `服务在端口 ${svc.port} 就绪前已退出（exit=${child.exitCode}），判定为启动失败`,
+          message: svc.port
+            ? `服务在端口 ${svc.port} 就绪前已退出（exit=${child.exitCode}），判定为启动失败`
+            : `CLI/脚本执行失败（exit=${child.exitCode}）：入口或依赖有问题，详见上方输出`,
         });
         return { status: 'Failed', pid: child.pid };
       }
@@ -347,11 +423,37 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       return { status: 'Unhealthy', pid: child.pid };
     }
 
+    // CLI 一次性执行成功（exit 0）：进程已正常结束，标记 Stopped；上层以此判定「启动校验通过」
+    if (!svc.port && cliExitCode !== undefined) {
+      this.setStatus(serviceId, 'Stopped');
+      this.broadcastServiceEvent(serviceId, svc.project_id);
+      this.logs.log({ level: 'info', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: 'CLI 执行成功（exit=0），非常驻服务，已正常结束' });
+      return { status: 'Stopped', pid: child.pid };
+    }
+
     this.setStatus(serviceId, 'Running');
     this.broadcastServiceEvent(serviceId, svc.project_id);
     this.refreshAccessPathInBackground(serviceId, svc.name, svc.port);
     this.audit.record({ subject: 'user:local-user', action: 'service.start', target: svc.name, result: 'ok', detail: { pid: child.pid, command: svc.start_command } });
+    this.writeRunArchive(svc, 'Running', { pid: child.pid, command: svc.start_command, adopted: false });
     return { status: 'Running', pid: child.pid };
+  }
+
+  /** 运行档案落库（V17 run_archives）：项目每次真实启动/停止的记录，供项目详情与经验沉淀 */
+  private writeRunArchive(svc: { project_id: string; name: string; port: number | null; start_command?: string | null }, status: string, detail: Record<string, unknown>) {
+    try {
+      const profile = this.ds.db.prepare('SELECT profile_hash FROM projects WHERE id = ?').get(svc.project_id) as { profile_hash: string | null } | undefined;
+      this.ds.db.prepare(
+        `INSERT INTO run_archives (id, project_id, profile_hash, run_kind, command, port, pid, status, health_json, summary, created_at)
+         VALUES (?, ?, ?, 'service', ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        randomUUID(), svc.project_id, profile?.profile_hash ?? null,
+        svc.start_command, svc.port, (detail.pid as number | undefined) ?? null, status,
+        JSON.stringify(detail).slice(0, 2000),
+        `${svc.name} → ${status}`,
+        new Date().toISOString(),
+      );
+    } catch { /* 档案写失败不阻断启动 */ }
   }
 
   /** 停止单个服务：共享服务引用保护 */
@@ -397,6 +499,7 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
         subject: 'user:local-user', action: 'service.stop', target: svc.name, result: 'ok',
         detail: { pid, method: 'adopted-pid' },
       });
+      this.writeRunArchive(svc, 'Stopped', { pid, method: 'adopted-pid' });
       this.logs.log({ level: 'info', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: `已终止外部实例 PID ${pid ?? '未知'}（端口 ${svc.port ?? '—'}）` });
       return { stopped: true };
     }
@@ -429,6 +532,7 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       subject: 'user:local-user', action: 'service.stop', target: svc.name, result: 'ok',
       detail: { pid, method: graceful ? 'stop_command' : 'pid-tree' },
     });
+    this.writeRunArchive(svc, 'Stopped', { pid, method: graceful ? 'stop_command' : 'pid-tree' });
     return { stopped: true };
   }
 
@@ -454,31 +558,45 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
   }
 
   /** HTTP 探活：任意响应（含 4xx/5xx）即认为该端口上是一个可用的 HTTP 服务 */
-  private httpProbe(port: number, urlPath = '/'): Promise<boolean> {
+  private httpProbe(port: number, urlPath = '/', expectedStatus?: number, method = 'GET'): Promise<boolean> {
     return new Promise((resolve) => {
-      const req = http.get({ host: '127.0.0.1', port, path: urlPath, timeout: 2500, headers: { 'User-Agent': 'DevPilot-probe' } }, (res) => {
+      const req = http.request({ host: '127.0.0.1', port, path: urlPath, timeout: 2500, method, headers: { 'User-Agent': 'DevPilot-probe' } }, (res) => {
         res.resume();
-        // 4xx/5xx 不算健康：Windows HTTP.sys（Microsoft-HTTPAPI/2.0）对任意 Host 都回 400，
+        // 期望状态码优先（用户可配置）；未配置时 4xx/5xx 不算健康：
+        // Windows HTTP.sys（Microsoft-HTTPAPI/2.0）对任意 Host 都回 400，
         // 曾经因此把系统占用的端口误判成「项目实例」接管，实际服务根本没起来。
-        resolve(typeof res.statusCode === 'number' && res.statusCode < 400);
+        if (typeof expectedStatus === 'number') {
+          resolve(res.statusCode === expectedStatus);
+        } else {
+          resolve(typeof res.statusCode === 'number' && res.statusCode < 400);
+        }
       });
       req.on('timeout', () => { req.destroy(); resolve(false); });
       req.on('error', () => resolve(false));
+      req.end();
     });
   }
 
-  /** health_check_json 里若给了 http 探针路径则用它，否则探 / */
-  private healthPath(svc: { health_check_json?: string | null }): string {
+  /** health_check_json 配置 → 探针参数（path/method/expectedStatus/timeout） */
+  private healthConfig(svc: { health_check_json?: string | null }): { path: string; method: string; expectedStatus?: number; timeoutMs: number } {
+    const fallback = { path: '/', method: 'GET', timeoutMs: 2500 };
     try {
-      if (!svc.health_check_json) return '/';
-      const h = JSON.parse(svc.health_check_json) as { path?: string; url?: string };
-      if (h?.path) return h.path;
-      if (h?.url) {
+      if (!svc.health_check_json) return fallback;
+      const h = JSON.parse(svc.health_check_json) as { path?: string; url?: string; method?: string; expectedStatus?: number; timeoutMs?: number; type?: string };
+      let pathPart = fallback.path;
+      if (h?.path) pathPart = h.path;
+      else if (h?.url) {
         const u = new URL(h.url);
-        return `${u.pathname}${u.search}` || '/';
+        pathPart = `${u.pathname}${u.search}` || '/';
       }
+      return {
+        path: pathPart,
+        method: (h?.method ?? 'GET').toUpperCase(),
+        expectedStatus: typeof h?.expectedStatus === 'number' ? h.expectedStatus : undefined,
+        timeoutMs: typeof h?.timeoutMs === 'number' ? Math.min(h.timeoutMs, 15_000) : fallback.timeoutMs,
+      };
     } catch { /* 配置非法则用默认 */ }
-    return '/';
+    return fallback;
   }
 
   /** 按端口反查监听进程 PID（Windows netstat / *nix lsof），失败返回 undefined */
