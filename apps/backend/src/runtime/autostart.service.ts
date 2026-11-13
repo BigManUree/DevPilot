@@ -84,7 +84,8 @@ export class AutoStartService {
       status: 'Running',
       startedAt: new Date().toISOString(),
       attempt: 0,
-      maxAttempts: 3,
+      // Python 类项目常见「每轮只缺一个包」的依赖链，3 轮不够装完，放宽到 6
+      maxAttempts: 6,
       steps: [],
     };
     this.jobs.set(job.id, job);
@@ -107,8 +108,157 @@ export class AutoStartService {
   private async run(job: AutoStartJob, project: { id: string; name: string; root_path: string; language: string | null; project_type: string }): Promise<void> {
     const root = project.root_path;
     const isBinary = project.project_type === 'binary' || project.language === 'binary-distribution';
-    let svc = this.primaryService(project.id);
-    if (!svc) throw new Error('该项目没有可启动的服务，请先在项目详情里添加服务配置');
+    const services = this.allServices(project.id);
+    if (!services.length) {
+      // 只含 README / 静态文件的仓库解析不出服务：建一个占位服务，让 Agent 决定怎么跑
+      const sid = randomUUID();
+      const now = new Date().toISOString();
+      this.ds.db
+        .prepare(
+          `INSERT INTO project_services (id, project_id, name, service_type, workdir, start_command, port, shared, status, created_at, updated_at)
+           VALUES (?, ?, ?, 'app', ?, NULL, NULL, 0, 'Stopped', ?, ?)`,
+        )
+        .run(sid, project.id, project.name, root, now, now);
+      this.step(job, 'detect', '项目里没有识别到服务，已创建占位服务，交由 Agent 分析启动方式');
+    }
+
+    const list = this.allServices(project.id);
+    if (!list.length) throw new Error('创建服务配置失败');
+
+    // 多服务项目（前后端分层等）：按依赖顺序逐个启动，不套用单一启动脚本——
+    // 根目录脚本通常只覆盖一个服务，按服务各自的启动命令更精确。
+    if (list.length > 1) {
+      await this.runMulti(job, project, list, isBinary);
+      return;
+    }
+    await this.runSingle(job, project, list[0], isBinary);
+  }
+
+  /** 多服务：基础设施(database/cache/mq) → backend → app → frontend 顺序，逐个启动+修复 */
+  private async runMulti(
+    job: AutoStartJob,
+    project: { id: string; name: string; root_path: string; language: string | null },
+    services: Array<{ id: string; name: string; service_type: string; start_command: string | null; port: number | null; workdir: string }>,
+    isBinary: boolean,
+  ): Promise<void> {
+    this.step(job, 'detect', `识别到 ${services.length} 个服务：${services.map((s) => `${s.name}(${s.service_type})`).join('、')}，按依赖顺序启动`);
+
+    const results: string[] = [];
+    let allOk = true;
+
+    for (const svc of services) {
+      // 1) 无启动命令的服务先让 Agent 分析
+      let fresh = this.getService(svc.id);
+      if (!fresh?.start_command) {
+        this.step(job, 'detect', `服务 ${svc.name} 没有启动命令，交由 Agent 分析启动方式`);
+        const analysis = await this.fixer.fix({
+          projectId: project.id,
+          rootPath: project.root_path,
+          projectName: project.name,
+          language: project.language ?? 'unknown',
+          isBinary,
+          startCommand: null,
+          port: fresh?.port ?? null,
+          logText: '（尚未启动：没有可用的启动命令）',
+          attempt: 0,
+          mode: 'analyze-start',
+        });
+        this.applyFixOutcome(job, svc.id, analysis);
+        fresh = this.getService(svc.id);
+        if (!fresh?.start_command) {
+          results.push(`✗ ${svc.name}：无法确定启动方式`);
+          allOk = false;
+          continue;
+        }
+      }
+
+      // 2) 启动 → 失败修复 → 重试
+      let ok = false;
+      let lastLog = '';
+      for (let attempt = 1; attempt <= job.maxAttempts; attempt++) {
+        job.attempt = attempt;
+        const cur = this.getService(svc.id)!;
+        const refined = this.refineStartCommand(project.root_path, cur.start_command);
+        if (refined.changed) {
+          this.applyServiceConfig(svc.id, { start_command: refined.command });
+          this.step(job, 'detect', `[${svc.name}] ${refined.note}`, refined.command);
+        }
+        const cmd = refined.command;
+        this.step(job, attempt === 1 ? 'start' : 'retry', `启动 ${svc.name}（${cur.service_type}）：${cmd}`);
+        const attemptStartedAt = new Date().toISOString();
+        try {
+          await this.runtime.stopService(svc.id, true);
+        } catch { /* 没在跑就忽略 */ }
+
+        let r: Awaited<ReturnType<RuntimeService['startService']>> | null = null;
+        let startError: string | null = null;
+        try {
+          r = await this.runtime.startService(svc.id);
+        } catch (e) {
+          // startService 抛异常（如端口被系统保留）不应中止整个任务，进入修复流程
+          startError = String((e as Error)?.message ?? e);
+        }
+
+        if (r?.status === 'Running') {
+          ok = true;
+          results.push(`✓ ${svc.name}：${cmd}${cur.port ? `（端口 ${cur.port}）` : ''}${r.adopted ? '，接管已有实例' : ''}`);
+          this.step(job, 'done', `${svc.name} 启动成功${cur.port ? `，端口 ${cur.port}` : ''}`);
+          break;
+        }
+
+        lastLog = startError ?? this.collectLogs(svc.name, r!.status, attemptStartedAt);
+        this.step(job, 'repair', `${svc.name} 第 ${attempt} 次启动失败（${startError ? `异常：${startError}` : r!.status}），交给 Agent 修复`, lastLog.slice(0, 600));
+        if (attempt === job.maxAttempts) break;
+
+        const fix = await this.fixer.fix({
+          projectId: project.id,
+          rootPath: project.root_path,
+          projectName: project.name,
+          language: project.language ?? 'unknown',
+          isBinary,
+          startCommand: cmd,
+          port: cur.port,
+          logText: lastLog,
+          attempt,
+          mode: 'repair',
+        });
+        this.applyFixOutcome(job, svc.id, fix);
+        if (!fix.changed) {
+          this.step(job, 'repair', `Agent 判断 ${svc.name} 无法自动修复：${fix.analysis || '（无说明）'}`);
+          break;
+        }
+      }
+      if (!ok) {
+        results.push(`✗ ${svc.name}：启动失败（详见上方日志）`);
+        allOk = false;
+      }
+    }
+
+    job.status = allOk ? 'Success' : 'Failed';
+    job.finishedAt = new Date().toISOString();
+    // 用户入口默认取最后一个前端服务的端口（没有前端则取第一个有端口的服务）
+    const front = [...services].reverse().find((s) => s.service_type === 'frontend' && s.port);
+    const anyPort = services.find((s) => s.port);
+    job.port = (front ?? anyPort)?.port ?? null;
+    job.report = results.join('\n');
+    this.step(job, allOk ? 'done' : 'failed', allOk ? `全部 ${services.length} 个服务已启动` : '部分服务启动失败', job.report);
+    this.notify.create({
+      type: allOk ? 'project.autostart.ok' : 'project.autostart.failed',
+      title: allOk ? `项目 ${project.name} 已启动（${services.length} 个服务）` : `项目 ${project.name} 部分服务启动失败`,
+      content: job.report.slice(0, 800),
+      priority: allOk ? 4 : 2,
+      projectId: project.id,
+    });
+  }
+
+  /** 单服务：保持原有「一键脚本优先 → 启动 → 修复 → 重试」闭环 */
+  private async runSingle(
+    job: AutoStartJob,
+    project: { id: string; name: string; root_path: string; language: string | null; project_type: string },
+    svc: { id: string; name: string; start_command: string | null; port: number | null; workdir: string },
+    isBinary: boolean,
+  ): Promise<void> {
+    const root = project.root_path;
 
     // 1) 一键启动脚本优先
     const hit = detectLaunchScript(root);
@@ -151,7 +301,7 @@ export class AutoStartService {
         mode: 'analyze-start',
       });
       this.applyFixOutcome(job, svc.id, analysis);
-      const fresh = this.primaryService(project.id);
+      const fresh = this.getService(svc.id);
       if (!fresh?.start_command) {
         job.status = 'Failed';
         job.finishedAt = new Date().toISOString();
@@ -160,7 +310,6 @@ export class AutoStartService {
         this.notify.create({ type: 'project.autostart.failed', title: `项目 ${project.name} 未能启动`, content: job.report, priority: 2 });
         return;
       }
-      svc = fresh;
       job.command = fresh.start_command;
       job.port = fresh.port;
     }
@@ -168,10 +317,10 @@ export class AutoStartService {
     // 3) 启动 → 失败 → 修复 → 重试
     for (let attempt = 1; attempt <= job.maxAttempts; attempt++) {
       job.attempt = attempt;
-      svc = this.primaryService(project.id);
-      if (!svc?.start_command) break;
+      const cur = this.getService(svc.id);
+      if (!cur?.start_command) break;
 
-      this.step(job, attempt === 1 ? 'start' : 'retry', `第 ${attempt} 次启动：${svc.start_command}`);
+      this.step(job, attempt === 1 ? 'start' : 'retry', `第 ${attempt} 次启动：${cur.start_command}`);
       const attemptStartedAt = new Date().toISOString();
       // 先清理上一次的残留进程，避免端口占用导致假失败
       try {
@@ -180,12 +329,18 @@ export class AutoStartService {
         /* 没在跑就忽略 */
       }
 
-      const r = await this.runtime.startService(svc.id);
-      if (r.status === 'Running') {
+      let r: Awaited<ReturnType<RuntimeService['startService']>> | null = null;
+      let startError: string | null = null;
+      try {
+        r = await this.runtime.startService(svc.id);
+      } catch (e) {
+        startError = String((e as Error)?.message ?? e);
+      }
+      if (r?.status === 'Running') {
         job.status = 'Success';
         job.finishedAt = new Date().toISOString();
         job.pid = r.pid;
-        job.report = `启动成功${r.adopted ? '（接管已在运行的实例）' : ''}：${svc.start_command}${svc.port ? `，端口 ${svc.port}` : ''}`;
+        job.report = `启动成功${r.adopted ? '（接管已在运行的实例）' : ''}：${cur.start_command}${cur.port ? `，端口 ${cur.port}` : ''}`;
         this.step(job, 'done', job.report);
         this.notify.create({
           type: 'project.autostart.ok',
@@ -198,12 +353,12 @@ export class AutoStartService {
       }
 
       // 失败：抓日志 → Agent 修复
-      const logText = this.collectLogs(svc.name, r.status, attemptStartedAt);
-      this.step(job, 'repair', `第 ${attempt} 次启动失败（${r.status}），抓取日志交给 Agent 修复`, logText.slice(0, 800));
+      const logText = startError ?? this.collectLogs(svc.name, r!.status, attemptStartedAt);
+      this.step(job, 'repair', `第 ${attempt} 次启动失败（${startError ? `异常：${startError}` : r!.status}），抓取日志交给 Agent 修复`, logText.slice(0, 800));
       if (attempt === job.maxAttempts) {
         job.status = 'Failed';
         job.finishedAt = new Date().toISOString();
-        job.report = `连续 ${job.maxAttempts} 次启动失败。最后一次状态 ${r.status}。\n\n最近日志：\n${logText.slice(-1200)}`;
+        job.report = `连续 ${job.maxAttempts} 次启动失败。最后一次状态 ${startError ?? r!.status}。\n\n最近日志：\n${logText.slice(-1200)}`;
         this.step(job, 'failed', job.report);
         this.notify.create({ type: 'project.autostart.failed', title: `项目 ${project.name} 自动修复后仍未启动`, content: job.report.slice(0, 800), priority: 2, projectId: project.id });
         return;
@@ -215,8 +370,8 @@ export class AutoStartService {
         projectName: project.name,
         language: project.language ?? 'unknown',
         isBinary,
-        startCommand: svc.start_command,
-        port: svc.port,
+        startCommand: cur.start_command,
+        port: cur.port,
         logText,
         attempt,
         mode: 'repair',
@@ -356,10 +511,19 @@ export class AutoStartService {
     return `服务状态：${status}\n\n--- 本轮服务输出 ---\n${svcLog || '（本轮没有任何输出，进程可能在启动阶段静默退出）'}\n\n--- 自动启动记录 ---\n${rtLog}`;
   }
 
-  private primaryService(projectId: string): { id: string; name: string; start_command: string | null; port: number | null; workdir: string } | null {
+  /** 项目的全部服务，按依赖顺序排列：基础设施 → backend → app/其他 → frontend */
+  private allServices(projectId: string): Array<{ id: string; name: string; service_type: string; start_command: string | null; port: number | null; workdir: string }> {
+    const rows = this.ds.db
+      .prepare('SELECT id, name, service_type, start_command, port, workdir, created_at FROM project_services WHERE project_id = ? ORDER BY created_at ASC')
+      .all(projectId) as Array<{ id: string; name: string; service_type: string; start_command: string | null; port: number | null; workdir: string; created_at: string }>;
+    const rank = (t: string) => (t === 'database' || t === 'cache' || t === 'mq' ? 0 : t === 'backend' ? 1 : t === 'frontend' ? 3 : 2);
+    return rows.sort((a, b) => rank(a.service_type) - rank(b.service_type));
+  }
+
+  private getService(serviceId: string): { id: string; name: string; service_type: string; start_command: string | null; port: number | null; workdir: string } | null {
     const row = this.ds.db
-      .prepare('SELECT id, name, start_command, port, workdir FROM project_services WHERE project_id = ? ORDER BY created_at ASC LIMIT 1')
-      .get(projectId) as { id: string; name: string; start_command: string | null; port: number | null; workdir: string } | undefined;
+      .prepare('SELECT id, name, service_type, start_command, port, workdir FROM project_services WHERE id = ?')
+      .get(serviceId) as { id: string; name: string; service_type: string; start_command: string | null; port: number | null; workdir: string } | undefined;
     return row ?? null;
   }
 

@@ -130,6 +130,65 @@ export class GitService {
     return { ok: r.ok, output: (r.stdout || r.stderr).slice(0, 1000) };
   }
 
+  /**
+   * 丢弃工作区修改（按文件）：
+   * - 已跟踪文件 → git checkout -- <file>（恢复到最后一次提交的版本）
+   * - 未跟踪文件（??）→ 直接删除（磁盘上本来就没有提交版本可恢复）
+   * 路径强制约束在仓库内部，防止越界删除。
+   */
+  async discard(repoPath: string, files: string[]) {
+    if (!this.isRepo(repoPath)) throw new Error('not a git repository');
+    if (!Array.isArray(files) || files.length === 0) return { ok: false, error: '未指定要丢弃的文件', restored: [], deleted: [], errors: [] };
+    const resolvedRoot = path.resolve(repoPath);
+    const safe = files.filter((f) => {
+      const p = path.resolve(resolvedRoot, f);
+      return p === resolvedRoot || p.startsWith(resolvedRoot + path.sep);
+    });
+    if (safe.length !== files.length) return { ok: false, error: '存在仓库外的路径，已整体拒绝', restored: [], deleted: [], errors: [] };
+
+    const ls = await this.run(repoPath, ['ls-files', '--', ...safe]);
+    const trackedSet = new Set(ls.stdout.split('\n').map((s) => s.trim()).filter(Boolean));
+    const tracked = safe.filter((f) => trackedSet.has(f));
+    const untracked = safe.filter((f) => !trackedSet.has(f));
+
+    const restored: string[] = [];
+    const deleted: string[] = [];
+    const errors: string[] = [];
+    if (tracked.length) {
+      const r = await this.run(repoPath, ['checkout', '--', ...tracked]);
+      if (r.ok) restored.push(...tracked);
+      else errors.push(`checkout 失败：${(r.stderr || r.stdout).slice(0, 300)}`);
+    }
+    for (const f of untracked) {
+      const p = path.resolve(resolvedRoot, f);
+      try {
+        if (fs.existsSync(p)) {
+          fs.rmSync(p, { recursive: true, force: true });
+          deleted.push(f);
+        } else {
+          deleted.push(f);
+        }
+      } catch (e) {
+        errors.push(`${f}：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    const ok = errors.length === 0;
+    this.audit.record({ subject: 'user:local-user', action: 'git.discard', target: repoPath, result: ok ? 'ok' : 'error', detail: { restored, deleted, errors } });
+    return { ok, restored, deleted, errors };
+  }
+
+  /** 回滚某次提交（git revert --no-edit，产生一条反向提交，不改写历史） */
+  async revertCommit(repoPath: string, hash: string) {
+    if (!this.isRepo(repoPath)) throw new Error('not a git repository');
+    if (!/^[0-9a-fA-F]{4,40}$/.test(hash)) return { ok: false, error: '非法的提交 hash' };
+    const st = await this.status(repoPath);
+    if (!st.clean) return { ok: false, error: '工作区有未提交修改，先提交或丢弃后再回滚', dirtyFiles: st.files };
+    const r = await this.run(repoPath, ['revert', '--no-edit', hash]);
+    const ok = r.ok;
+    this.audit.record({ subject: 'user:local-user', action: 'git.revert', target: repoPath, result: ok ? 'ok' : 'error', detail: { hash } });
+    return { ok, output: (r.stdout || r.stderr).slice(0, 2000) };
+  }
+
   /** push：默认拒绝，需显式 allowPush（UI 二次确认）+ D02 策略五道门 */
   async push(repoPath: string, allowPush: boolean, subjectType: string, subjectId: string) {
     if (!allowPush) {

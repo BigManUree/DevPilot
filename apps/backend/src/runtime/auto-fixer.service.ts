@@ -195,6 +195,7 @@ export class AutoFixerService {
       'commands 会在项目根目录下用 Windows cmd 执行；只允许安装依赖、构建、初始化类命令。',
       '禁止：删除文件、改注册表、结束其它进程、修改系统设置、任何不可恢复操作。',
       '优先使用项目自带运行环境（如 .venv\\Scripts\\python.exe、node_modules、gradlew）。',
+      '纯静态站点（只有 index.html 一类文件）可用 "python -m http.server <端口>" 起服务；端口取 8000-8999 里大概率空闲的值。',
       '若判断故障来自项目外部（端口被其它程序占用、缺少系统级依赖），commands 与 files 都给空数组，在 analysis 里说明真实原因。',
       fileRule,
       modeRule,

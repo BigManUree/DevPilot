@@ -1,20 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ConfigProvider, Typography, Table, Button, Input, Space, Tag, Card,
-  Modal, message, List, Tabs, Descriptions, Select, Badge, Steps, Result, Segmented,
+  Modal, message, List, Tabs, Descriptions, Select, Badge, Steps, Result, Checkbox,
 } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
-import { api, wsUrl } from './api';
-import '@xterm/xterm/css/xterm.css';
-import MonacoEditor from '@monaco-editor/react';
+import { api, pickDirectory } from './api';
 import { buildAntdTheme, type ThemeMode } from './theme';
 import { useThemeMode } from './components/useTheme';
 import Shell, { PAGES } from './components/Shell';
-import { Mono, PageHeader, SectionCard, StateBlock, StatusTag, statusColor } from './components/ui';
+import { MetricCard, Mono, PageHeader, SectionCard, StateBlock, StatusTag, statusColor } from './components/ui';
 import { formatTime } from './utils';
 import Dashboard from './pages/Dashboard';
 import Projects from './pages/Projects';
-import Runtime from './pages/Runtime';
+import { getCachedEnvironments, primeEnvironments, refreshEnvironments } from './envCache';
+import { PROVIDER_LOGOS } from './providerLogos';
 import './styles.css';
 
 /** 删除类操作统一确认：说明删除范围，避免误点 */
@@ -46,50 +45,64 @@ function Tasks() {
     setAskTask(null); setAnswer(''); void load();
   };
 
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const filteredTasks = tasks.filter((task) => statusFilter === 'all' || task.status === statusFilter);
+  const counts = {
+    running: tasks.filter((task) => ['Running', 'Preparing'].includes(task.status)).length,
+    waiting: tasks.filter((task) => ['WaitingApproval', 'WaitingInput'].includes(task.status)).length,
+    pending: tasks.filter((task) => task.status === 'Pending').length,
+    done: tasks.filter((task) => ['Completed', 'Failed', 'Cancelled'].includes(task.status)).length,
+  };
+
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
-      <Table rowKey="id" size="small" dataSource={tasks}
-        columns={[
-          { title: '目标', dataIndex: 'input_summary', ellipsis: true },
-          { title: '状态', dataIndex: 'status', render: (s) => <Tag color={statusColor[s] ?? 'default'}>{s}</Tag> },
-          { title: '结果', dataIndex: 'result_summary', ellipsis: true },
-          { title: '创建时间', dataIndex: 'created_at' },
-          {
-            title: '操作', render: (_, r) => (
-              <Space>
-                <Button size="small" onClick={async () => setDetail(await api(`/tasks/${r.id}`))}>详情</Button>
-                {['Pending', 'WaitingInput'].includes(r.status) && (
-                  <Button size="small" type="primary" onClick={async () => { await api(`/tasks/${r.id}/run`, 'POST'); void load(); }}>执行</Button>
-                )}
-                {['Running', 'Preparing'].includes(r.status) && (
-                  <Button size="small" onClick={async () => { await api(`/tasks/${r.id}/pause`, 'POST'); void load(); }}>暂停</Button>
-                )}
-                {r.status === 'Paused' && (
-                  <Button size="small" type="primary" onClick={async () => { await api(`/tasks/${r.id}/resume`, 'POST'); void load(); }}>恢复</Button>
-                )}
-                {r.status === 'WaitingInput' && (
-                  <Button size="small" type="primary" onClick={() => { setAskTask(r); setAnswer(''); }}>补充信息</Button>
-                )}
-                {['Pending', 'Preparing', 'Running', 'Paused', 'WaitingApproval', 'WaitingInput'].includes(r.status) && (
-                  <Button size="small" danger onClick={async () => { await api(`/tasks/${r.id}/cancel`, 'POST'); void load(); }}>取消</Button>
-                )}
-              </Space>
-            ),
-          },
+      <div className="dp-metrics">
+        <MetricCard label="执行中" value={counts.running} hint="含准备与运行状态" />
+        <MetricCard label="等待确认" value={counts.waiting} hint="审批或补充输入" tone="amber" />
+        <MetricCard label="待执行" value={counts.pending} hint="可在操作列启动" />
+        <MetricCard label="已结束" value={counts.done} hint="完成、失败或取消" tone="green" />
+      </div>
+      <SectionCard title={`任务列表（${filteredTasks.length}）`} extra={(
+        <Select value={statusFilter} onChange={setStatusFilter} style={{ width: 140 }} size="small" options={[
+          { value: 'all', label: '全部状态' }, { value: 'Running', label: '运行中' }, { value: 'Preparing', label: '准备中' },
+          { value: 'Pending', label: '待执行' }, { value: 'WaitingApproval', label: '待审批' }, { value: 'WaitingInput', label: '待输入' },
+          { value: 'Paused', label: '已暂停' }, { value: 'Completed', label: '已完成' }, { value: 'Failed', label: '失败' },
         ]} />
-      <Modal open={!!detail} onCancel={() => setDetail(null)} footer={null} title="任务详情" width={760}>
+      )}>
+        <StateBlock loading={false} empty={filteredTasks.length === 0} emptyText="没有符合当前筛选条件的任务">
+          <Table rowKey="id" size="small" dataSource={filteredTasks} pagination={{ pageSize: 10, hideOnSinglePage: true }}
+            columns={[
+              { title: '任务目标', dataIndex: 'input_summary', ellipsis: true, render: (value: string, row) => <span><Typography.Text strong>{value || '未命名任务'}</Typography.Text><div className="dp-desc">{String(row.id).slice(0, 8)} · {formatTime(row.created_at)}</div></span> },
+              { title: '状态', dataIndex: 'status', width: 105, render: (s) => <StatusTag status={s} /> },
+              { title: '结果', dataIndex: 'result_summary', ellipsis: true },
+              {
+                title: '操作', width: 265, render: (_, r) => (
+                  <Space size={4} wrap>
+                    <Button size="small" onClick={async () => setDetail(await api(`/tasks/${r.id}`))}>详情</Button>
+                    {['Pending', 'WaitingInput'].includes(r.status) && <Button size="small" type="primary" onClick={async () => { await api(`/tasks/${r.id}/run`, 'POST'); void load(); }}>执行</Button>}
+                    {['Running', 'Preparing'].includes(r.status) && <Button size="small" onClick={async () => { await api(`/tasks/${r.id}/pause`, 'POST'); void load(); }}>暂停</Button>}
+                    {r.status === 'Paused' && <Button size="small" type="primary" onClick={async () => { await api(`/tasks/${r.id}/resume`, 'POST'); void load(); }}>恢复</Button>}
+                    {r.status === 'WaitingInput' && <Button size="small" type="primary" onClick={() => { setAskTask(r); setAnswer(''); }}>补充信息</Button>}
+                    {['Pending', 'Preparing', 'Running', 'Paused', 'WaitingApproval', 'WaitingInput'].includes(r.status) && <Button size="small" danger onClick={async () => { await api(`/tasks/${r.id}/cancel`, 'POST'); void load(); }}>取消</Button>}
+                  </Space>
+                ),
+              },
+            ]} />
+        </StateBlock>
+      </SectionCard>
+      <Modal open={!!detail} onCancel={() => setDetail(null)} footer={null} title="任务详情" width={780}>
         {detail && (
           <Tabs items={[
             { key: 'subs', label: '子任务', children: (
               <Table rowKey="id" size="small" pagination={false} dataSource={detail.subtasks}
                 columns={[
                   { title: 'Agent', dataIndex: 'assigned_agent' },
-                  { title: '状态', dataIndex: 'status', render: (s) => <Tag color={statusColor[s] ?? 'default'}>{s}</Tag> },
+                  { title: '状态', dataIndex: 'status', render: (s) => <StatusTag status={s} /> },
                   { title: '输入', dataIndex: 'input_json', ellipsis: true },
                 ]} />
             ) },
             { key: 'ck', label: '检查点', children: <List size="small" dataSource={detail.checkpoints} renderItem={(c: any) => <List.Item>{c.created_at} — {c.state_snapshot}</List.Item>} /> },
-            { key: 'task', label: '任务', children: <pre style={{ maxHeight: 300, overflow: 'auto' }}>{JSON.stringify(detail.task, null, 2)}</pre> },
+            { key: 'task', label: '任务', children: <pre className="dp-code-block">{JSON.stringify(detail.task, null, 2)}</pre> },
           ]} />
         )}
       </Modal>
@@ -102,176 +115,34 @@ function Tasks() {
   );
 }
 
-/* ---------- 终端中心（xterm.js） ---------- */
-function Terminal() {
-  const [sessions, setSessions] = useState<any[]>([]);
-  const [active, setActive] = useState<string | null>(null);
-  const [wsState, setWsState] = useState<'connecting' | 'open' | 'closed'>('connecting');
-  const [wsKey, setWsKey] = useState(0);
-  const [creating, setCreating] = useState(false);
-  const [closing, setClosing] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
-  const termRef = useRef<{ term: any; fit: any } | null>(null);
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const activeRef = useRef<string | null>(null);
-  // 每会话独立输出缓冲（切会话时回放），单会话字符上限防止长跑实例吃内存
-  const buffersRef = useRef<Map<string, string>>(new Map());
-  const [logLines, setLogLines] = useState<string[]>([]);
-  const BUF_LIMIT = 300_000;
-
-  const load = React.useCallback(async () => {
-    try { setSessions(await api('/terminal/sessions')); } catch (e: any) { message.error(e?.message ?? String(e)); }
-  }, []);
-  useEffect(() => { void load(); }, [load]);
-
-  // 全局 WS：按 payload.sessionId 路由到对应缓冲
-  useEffect(() => {
-    let alive = true;
-    setWsState('connecting');
-    void (async () => {
-      const ws = new WebSocket(await wsUrl());
-      wsRef.current = ws;
-      ws.onopen = () => { if (alive) setWsState('open'); };
-      ws.onclose = () => { if (alive) setWsState('closed'); };
-      ws.onerror = () => { if (alive) setWsState('closed'); };
-      ws.onmessage = (ev) => {
-        if (!alive) return;
-        try {
-          const evt = JSON.parse(String(ev.data));
-          if (evt.event_type === 'terminal.data') {
-            const sid = evt.payload.sessionId as string;
-            const chunk = evt.payload.data as string;
-            const next = (buffersRef.current.get(sid) ?? '') + chunk;
-            buffersRef.current.set(sid, next.length > BUF_LIMIT ? next.slice(-BUF_LIMIT) : next);
-            if (sid === activeRef.current && termRef.current) termRef.current.term.write(chunk);
-          }
-          if (evt.event_type === 'runtime.log') setLogLines((l) => [...l.slice(-200), `[${evt.severity}] ${evt.source_module}: ${evt.payload.message}`]);
-        } catch { /* 忽略非 JSON 帧 */ }
-      };
-    })();
-    return () => { alive = false; wsRef.current?.close(); };
-  }, [wsKey]);
-
-  // 挂载 xterm 实例（active 变化时重建并回放缓冲）
-  useEffect(() => {
-    activeRef.current = active;
-    if (!active || !hostRef.current) return;
-    Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')]).then(([{ Terminal }, { FitAddon }]) => {
-      const fit = new FitAddon();
-      const term = new Terminal({
-        fontSize: 13,
-        fontFamily: '"Cascadia Code", Consolas, "Courier New", monospace',
-        cursorBlink: true,
-        convertEol: true,
-        theme: {
-          background: '#171A1F', foreground: '#E4E7EC', cursor: '#60A5FA',
-          selectionBackground: '#2B3446',
-          black: '#1F2329', red: '#F26D6D', green: '#7CCF9B', yellow: '#E8C579',
-          blue: '#7AA7F0', magenta: '#C79BE8', cyan: '#7FD3D3', white: '#E4E7EC',
-        },
-      });
-      term.loadAddon(fit);
-      term.open(hostRef.current!);
-      try { fit.fit(); } catch { /* 容器未就绪 */ }
-      term.write(buffersRef.current.get(active) ?? '');
-      term.onData((d: string) => {
-        if (activeRef.current) wsRef.current?.send(JSON.stringify({ event: 'terminal.input', data: { sessionId: activeRef.current, data: d } }));
-      });
-      const onResize = () => { try { fit.fit(); } catch { /* 忽略 */ } };
-      window.addEventListener('resize', onResize);
-      termRef.current = { term, fit };
-      return () => window.removeEventListener('resize', onResize);
-    });
-    return () => { termRef.current?.term.dispose(); termRef.current = null; };
-  }, [active]);
-
-  const createSession = async () => {
-    if (creating) return;
-    setCreating(true);
-    try {
-      const r = await api<{ sessionId: string }>('/terminal/sessions', 'POST', {});
-      setActive(r.sessionId);
-      await load();
-    } catch (e: any) {
-      message.error('新建终端失败：' + (e?.message ?? String(e)));
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  const killSession = (sid: string) => {
-    Modal.confirm({
-      title: '关闭这个终端会话？',
-      content: '该会话中正在运行的命令会被终止，其他会话不受影响。',
-      okText: '关闭会话',
-      okButtonProps: { danger: true },
-      onOk: async () => {
-        setClosing(true);
-        try {
-          await api(`/terminal/sessions/${sid}`, 'DELETE');
-          buffersRef.current.delete(sid);
-          if (active === sid) setActive(null);
-          await load();
-        } catch (e: any) {
-          message.error('关闭失败：' + (e?.message ?? String(e)));
-        } finally {
-          setClosing(false);
-        }
-      },
-    });
-  };
-
-  const sessionLabel = (s: any) => s.cwd?.split(/[\\/]/).pop() || s.sessionId.slice(0, 8);
-  const wsText = wsState === 'open' ? '已连接' : wsState === 'connecting' ? '连接中' : '已断开';
-
-  return (
-    <div>
-      <SectionCard
-        title="终端会话"
-        extra={<Button size="small" type="primary" loading={creating} onClick={() => void createSession()}>新建终端</Button>}
-        style={{ marginBottom: 16 }}
-      >
-        <Space wrap style={{ marginBottom: sessions.length ? 12 : 0 }}>
-          {sessions.length > 0 ? (
-            <Segmented
-              value={active ?? undefined}
-              onChange={(v) => setActive(String(v))}
-              options={sessions.map((s) => ({ value: s.sessionId, label: sessionLabel(s) }))}
-            />
-          ) : <span className="dp-desc">还没有终端会话。新建后即可在当前目录直接执行命令。</span>}
-          {active && <Button size="small" danger ghost loading={closing} onClick={() => killSession(active)}>关闭当前会话</Button>}
-          <span className="dp-status-row" style={{ marginLeft: 'auto' }}>
-            <span className={`dp-dot ${wsState === 'open' ? 'ok' : wsState === 'closed' ? 'bad' : ''}`} />
-            <span style={{ fontSize: 12, color: 'var(--dp-text-2)' }}>推送 {wsText}</span>
-            {wsState === 'closed' && <Button size="small" type="link" onClick={() => setWsKey((k) => k + 1)}>重连</Button>}
-          </span>
-        </Space>
-        <div style={{ border: '1px solid #E4E7EC', borderRadius: 8, overflow: 'hidden', background: '#171A1F' }}>
-          <div ref={hostRef} style={{ height: 400, padding: 8 }} />
-        </div>
-        {!active && <p className="dp-desc" style={{ marginTop: 8 }}>选择或新建一个会话后，这里显示交互式终端。</p>}
-      </SectionCard>
-
-      <SectionCard title={`实时日志流（${logLines.length}）`}>
-        <pre className="dp-mono" style={{ maxHeight: 180, overflow: 'auto', margin: 0, color: 'var(--dp-text-2)', background: 'var(--dp-code-bg)', border: '1px solid var(--dp-border)', borderRadius: 6, padding: 8 }}>
-          {logLines.slice(-40).join('\n') || '（等待运行时事件）'}
-        </pre>
-      </SectionCard>
-    </div>
-  );
-}
-
 /* ---------- 日志与诊断 ---------- */
 function Logs() {
   const [rows, setRows] = useState<any[]>([]);
   const [level, setLevel] = useState<string | undefined>();
   const [source, setSource] = useState<string | undefined>();
   const [logExcerpt, setLogExcerpt] = useState('');
-  const [verifyCmd, setVerifyCmd] = useState('node --version');
   const [diag, setDiag] = useState<any>(null);
   const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // 「查看内容」弹窗：读取该行来源模块对应的日志文件尾部正文
+  const [viewSource, setViewSource] = useState<string | null>(null);
+  const [viewText, setViewText] = useState('');
+  const [viewLoading, setViewLoading] = useState(false);
+
+  const openLogContent = async (row: any) => {
+    setViewSource(row.source_module ?? row.body_ref ?? 'log');
+    setViewLoading(true);
+    setViewText('');
+    try {
+      const r = await api<{ tail: string }>(`/logs/tail?sourceModule=${encodeURIComponent(row.source_module ?? '')}&lines=400`);
+      setViewText(r.tail || '（该日志文件为空）');
+    } catch (e: any) {
+      setViewText('读取失败：' + (e?.message ?? String(e)));
+    } finally {
+      setViewLoading(false);
+    }
+  };
 
   const load = React.useCallback(async () => {
     setError(null);
@@ -295,9 +166,8 @@ function Logs() {
       title: '开始 AI 诊断修复？',
       content: (
         <div>
-          <p>诊断会把下面两段内容发给当前模型：日志摘录（{logExcerpt.length} 字符）、验证命令。</p>
-          <p>模型给出的文件修改会先备份再写入，写入与命令执行都经过审批门；验证失败会自动回滚。</p>
-          {verifyCmd.trim() && <p className="dp-mono" style={{ fontSize: 12 }}>验证命令：{verifyCmd}</p>}
+          <p>诊断会把日志摘录（{logExcerpt.length} 字符）发给当前模型。</p>
+          <p>模型给出的文件修改会先备份再写入，写入与命令执行都经过审批门。</p>
         </div>
       ),
       okText: '开始诊断',
@@ -305,7 +175,7 @@ function Logs() {
         setRunning(true);
         setDiag(null);
         try {
-          const r = await api<any>('/diagnostics', 'POST', { logExcerpt, verifyCommand: verifyCmd || undefined });
+          const r = await api<any>('/diagnostics', 'POST', { logExcerpt });
           setDiag(r);
           message.info(`诊断状态：${r?.status ?? '未知'}`);
         } catch (e: any) {
@@ -328,16 +198,10 @@ function Logs() {
     <div>
       <SectionCard title="AI 诊断修复" style={{ marginBottom: 16 }}>
         <p className="dp-desc" style={{ marginTop: 0, marginBottom: 10 }}>
-          流程：读日志 → 模型定位根因 → 生成文件级修复 → 备份 → 写入（审批门）→ 验证命令 → 失败自动回滚。
+          流程：读日志 → 模型定位根因 → 生成文件级修复 → 备份 → 写入（审批门）。
         </p>
         <Space direction="vertical" style={{ width: '100%' }}>
           <Input.TextArea rows={4} placeholder="粘贴错误日志或堆栈" value={logExcerpt} onChange={(e) => setLogExcerpt(e.target.value)} />
-          <Input
-            value={verifyCmd}
-            onChange={(e) => setVerifyCmd(e.target.value)}
-            placeholder="验证命令（留空则不做执行验证）"
-            addonBefore="验证"
-          />
           <div>
             <Button type="primary" loading={running} onClick={runDiagnose}>诊断并修复</Button>
           </div>
@@ -398,15 +262,39 @@ function Logs() {
           <Button onClick={() => void load()}>查询</Button>
         </Space>
         <StateBlock loading={loading} error={error} onRetry={() => void load()} empty={rows.length === 0} emptyText="当前筛选条件下没有日志">
-          <Table rowKey="id" size="small" dataSource={rows} pagination={{ pageSize: 12 }} scroll={{ x: 760 }}
+          <Table rowKey="id" size="small" dataSource={rows} pagination={{ pageSize: 12 }} scroll={{ x: 820 }}
             columns={[
               { title: '时间', dataIndex: 'created_at', width: 120, render: (v: string) => <Mono title={v}>{formatTime(v)}</Mono> },
               { title: '级别', dataIndex: 'level', width: 80, render: (l) => <Tag color={l === 'error' || l === 'fatal' ? 'red' : l === 'warn' ? 'orange' : 'default'}>{l}</Tag> },
-              { title: '来源', dataIndex: 'source_module', width: 200, ellipsis: true },
+              { title: '来源', dataIndex: 'source_module', width: 180, ellipsis: true },
               { title: '日志文件', dataIndex: 'body_ref', ellipsis: true, render: (v: string) => <Mono title={v}>{v}</Mono> },
+              {
+                title: '操作', width: 100, render: (_, r: any) => (
+                  <Button size="small" onClick={() => void openLogContent(r)}>查看内容</Button>
+                ),
+              },
             ]} />
         </StateBlock>
       </SectionCard>
+
+      <Modal
+        open={!!viewSource}
+        onCancel={() => setViewSource(null)}
+        footer={null}
+        width={860}
+        title={viewSource ? `日志内容 — ${viewSource}` : '日志内容'}
+      >
+        <pre
+          className="dp-mono"
+          style={{
+            margin: 0, maxHeight: 520, overflow: 'auto', fontSize: 12, lineHeight: '18px',
+            background: 'var(--dp-code-bg)', border: '1px solid var(--dp-border)', borderRadius: 6, padding: 10,
+            whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+          }}
+        >
+          {viewLoading ? '加载中…' : viewText}
+        </pre>
+      </Modal>
     </div>
   );
 }
@@ -417,80 +305,124 @@ function Approvals() {
   const load = React.useCallback(async () => setRows(await api('/approvals')), []);
   useEffect(() => { void load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, [load]);
 
+  const [acting, setActing] = useState<string | null>(null);
+  const highRisk = rows.filter((row) => row.risk_level === 'high').length;
+  const mediumRisk = rows.filter((row) => row.risk_level === 'medium').length;
+
   const act = async (id: string, approve: boolean) => {
-    await api(`/approvals/${id}/${approve ? 'approve' : 'reject'}`, 'POST');
-    message.success(approve ? '已授权' : '已拒绝');
-    void load();
+    if (acting) return;
+    setActing(id);
+    try {
+      await api(`/approvals/${id}/${approve ? 'approve' : 'reject'}`, 'POST');
+      message.success(approve ? '已授权' : '已拒绝');
+      void load();
+    } catch (e: any) { message.error(e?.message ?? String(e)); }
+    finally { setActing(null); }
   };
 
   return (
-    <Table rowKey="id" size="small" dataSource={rows}
-      columns={[
-        { title: '请求方', dataIndex: 'requester' },
-        { title: '操作摘要', dataIndex: 'action_summary' },
-        { title: '风险', dataIndex: 'risk_level', render: (r) => <Tag color={r === 'high' ? 'red' : r === 'medium' ? 'orange' : 'default'}>{r}</Tag> },
-        { title: '时间', dataIndex: 'created_at' },
-        {
-          title: '操作', render: (_, r) => (
-            <Space>
-              <Button size="small" type="primary" onClick={() => void act(r.id, true)}>批准</Button>
-              <Button size="small" danger onClick={() => void act(r.id, false)}>拒绝</Button>
-            </Space>
-          ),
-        },
-      ]} />
+    <Space direction="vertical" style={{ width: '100%' }}>
+      <div className="dp-metrics" style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}>
+        <MetricCard label="待处理" value={rows.length} hint="每 3 秒自动刷新" />
+        <MetricCard label="高风险" value={highRisk} hint="建议逐条确认" tone="amber" />
+        <MetricCard label="中风险" value={mediumRisk} hint="涉及状态或文件写入" />
+      </div>
+      <SectionCard title="审批队列">
+        <StateBlock loading={false} empty={rows.length === 0} emptyText="没有等待授权的操作">
+          <Table rowKey="id" size="small" dataSource={rows}
+            columns={[
+              { title: '请求方', dataIndex: 'requester', width: 150 },
+              { title: '操作摘要', dataIndex: 'action_summary', ellipsis: true },
+              { title: '风险', dataIndex: 'risk_level', width: 95, render: (r) => <Tag color={r === 'high' ? 'red' : r === 'medium' ? 'orange' : 'default'}>{r}</Tag> },
+              { title: '时间', dataIndex: 'created_at', width: 180, render: (value: string) => <Mono title={value}>{formatTime(value)}</Mono> },
+              {
+                title: '操作', width: 140, render: (_, r) => (
+                  <Space size={4}>
+                    <Button size="small" type="primary" loading={acting === r.id} onClick={() => void act(r.id, true)}>批准</Button>
+                    <Button size="small" danger loading={acting === r.id} onClick={() => void act(r.id, false)}>拒绝</Button>
+                  </Space>
+                ),
+              },
+            ]} />
+        </StateBlock>
+      </SectionCard>
+    </Space>
   );
 }
 
 /* ---------- 环境检测 ---------- */
 function Environments() {
   const [tools, setTools] = useState<any[]>([]);
-  useEffect(() => { void api<any[]>('/environments').then(setTools); }, []);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // 打开页面优先读启动时缓存的检测结果，不再每次进入都重新检测
+  const load = React.useCallback(async () => {
+    setError(null);
+    try {
+      setTools(await getCachedEnvironments());
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  // 手动刷新：强制重新检测一遍
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      setTools(await refreshEnvironments());
+      message.success('环境检测完成');
+    } catch (e: any) {
+      message.error('检测失败：' + (e?.message ?? String(e)));
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   return (
-    <Table rowKey="id" size="small" dataSource={tools}
-      columns={[
-        { title: '工具', dataIndex: 'name' },
-        { title: '状态', dataIndex: 'status', render: (s) => <Tag color={s === 'ok' ? 'green' : 'red'}>{s}</Tag> },
-        { title: '版本', dataIndex: 'version' },
-        { title: '安装指引', dataIndex: 'installHint' },
-      ]} />
+    <SectionCard
+      title="运行时与工具检测"
+      extra={<Button size="small" loading={refreshing} onClick={() => void refresh()}>刷新检测</Button>}
+    >
+      <p className="dp-desc" style={{ marginTop: 0 }}>应用启动时自动检测一次；如安装了新工具，点右上角「刷新检测」重新扫描。</p>
+      <StateBlock loading={loading} error={error} onRetry={() => void load()} empty={tools.length === 0} emptyText="暂无检测结果，点「刷新检测」开始扫描">
+        <Table rowKey="id" size="small" dataSource={tools}
+          columns={[
+            { title: '工具', dataIndex: 'name' },
+            { title: '状态', dataIndex: 'status', render: (s) => <Tag color={s === 'ok' ? 'green' : 'red'}>{s}</Tag> },
+            { title: '版本', dataIndex: 'version' },
+            { title: '安装指引', dataIndex: 'installHint' },
+          ]} />
+      </StateBlock>
+    </SectionCard>
   );
 }
 
-/* ---------- 系统设置 ---------- */
-function Settings({ rerunOnboarding }: { rerunOnboarding: () => void }) {
+/* ---------- 系统设置（模型供应商：ccswitch 式卡片切换，官方品牌图标） ---------- */
+
+function Settings({ rerunOnboarding, themeMode, onThemeChange }: { rerunOnboarding: () => void; themeMode: ThemeMode; onThemeChange: (mode: ThemeMode) => void }) {
   const [st, setSt] = useState<any>(null);
-  const [key, setKey] = useState('');
-  const [provider, setProvider] = useState<string>('deepseek');
-  const [model, setModel] = useState('');
-  const [baseUrl, setBaseUrl] = useState('');
+  const [switching, setSwitching] = useState<string | null>(null);
+  // 配置弹窗：编辑某个供应商的 Key / 模型 / Base URL
+  const [editing, setEditing] = useState<any>(null);
+  const [keyVal, setKeyVal] = useState('');
+  const [modelVal, setModelVal] = useState('');
+  const [urlVal, setUrlVal] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const load = React.useCallback(async () => setSt(await api('/models/status')), []);
   useEffect(() => { void load(); }, [load]);
 
-  const [saving, setSaving] = useState(false);
-  const [switching, setSwitching] = useState<string | null>(null);
-
-  const save = async () => {
-    if (!key.trim() || saving) return;
-    setSaving(true);
-    try {
-      await api('/models/config', 'POST', { provider, apiKey: key, model: model || undefined, baseUrl: baseUrl || undefined });
-      message.success(`API Key 已保存（${provider}）`);
-      setKey('');
-      await load();
-    } catch (e: any) {
-      message.error('保存失败：' + (e?.message ?? String(e)));
-    } finally {
-      setSaving(false);
-    }
-  };
   const switchTo = async (p: string) => {
     if (switching) return;
     setSwitching(p);
     try {
       const r = await api<{ provider: string; keyConfigured: boolean }>('/models/switch', 'POST', { provider: p });
-      r.keyConfigured ? message.success(`已切换到 ${p}`) : message.warning(`已切换到 ${p}，但该供应商尚未配置 Key`);
+      r.keyConfigured ? message.success(`已切换到 ${p}`) : message.warning(`已切换到 ${p}，但该供应商尚未配置 Key，点「配置」补上即可`);
       await load();
     } catch (e: any) {
       message.error('切换失败：' + (e?.message ?? String(e)));
@@ -499,105 +431,327 @@ function Settings({ rerunOnboarding }: { rerunOnboarding: () => void }) {
     }
   };
 
+  const openConfig = (p: any) => {
+    setEditing(p);
+    setKeyVal('');
+    setModelVal(p.defaultModel ?? '');
+    setUrlVal(p.baseUrl ?? '');
+  };
+
+  const saveConfig = async () => {
+    if (!editing || saving) return;
+    if (!keyVal.trim()) { message.warning('API Key 必填（已配置的 Key 重新保存即可覆盖）'); return; }
+    setSaving(true);
+    try {
+      await api('/models/config', 'POST', {
+        provider: editing.id,
+        apiKey: keyVal.trim(),
+        model: modelVal.trim() || undefined,
+        baseUrl: urlVal.trim() || undefined,
+      });
+      message.success(`${editing.label} 配置已保存`);
+      setEditing(null);
+      await load();
+    } catch (e: any) {
+      message.error('保存失败：' + (e?.message ?? String(e)));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const current = st?.providers?.find((p: any) => p.active);
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
-      <Card size="small" title="模型供应商">
-        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
-          全部走 OpenAI 兼容协议。Key 保存在 Windows 凭据管理器（不可用时降级为本地加密文件），
-          界面与日志只显示「已配置 / 未配置」，不回显明文；需要删除或轮换时可在系统「凭据管理器」中操作，或在此重新保存覆盖。
-          当前激活：<Tag color="blue">{current?.label ?? st?.provider}</Tag>
-          {current && <Typography.Text type="secondary">模型 {current.defaultModel}{current.keyConfigured ? '' : ' · 未配置 Key'}</Typography.Text>}
-        </Typography.Paragraph>
-        <Table rowKey="id" size="small" pagination={false} dataSource={st?.providers ?? []}
-          columns={[
-            { title: '供应商', dataIndex: 'label' },
-            { title: 'Base URL', dataIndex: 'baseUrl', ellipsis: true },
-            { title: '默认模型', dataIndex: 'defaultModel' },
-            { title: 'Key', dataIndex: 'keyConfigured', render: (v) => <Tag color={v ? 'green' : 'default'}>{v ? '已配置' : '未配置'}</Tag> },
-            { title: '操作', render: (_, p: any) => p.active
-              ? <Tag color="blue">使用中</Tag>
-              : <Button size="small" loading={switching === p.id} onClick={() => switchTo(p.id)}>切换</Button> },
-          ]} />
-        <div style={{ marginTop: 12 }}>
-          <Space wrap>
-            <Select style={{ width: 150 }} value={provider} onChange={setProvider}
-              options={(st?.providers ?? []).map((p: any) => ({ value: p.id, label: p.label }))} />
-            <Input.Password placeholder="API Key（sk-...）" style={{ width: 260 }} value={key} onChange={(e) => setKey(e.target.value)} />
-            <Input placeholder="覆盖默认模型（可选）" style={{ width: 200 }} value={model} onChange={(e) => setModel(e.target.value)} />
-            <Input placeholder="覆盖 Base URL（可选，custom 必填）" style={{ width: 280 }} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-            <Button type="primary" loading={saving} disabled={!key.trim()} onClick={save}>保存 Key</Button>
-          </Space>
+      <Card size="small" title="外观与主题">
+        <p className="dp-desc" style={{ marginTop: 0, marginBottom: 14 }}>选择浅色、深色，或随操作系统自动切换。设置会保存在本机，并在下次启动时恢复。</p>
+        <div className="dp-theme-options">
+          {([
+            { key: 'light' as ThemeMode, label: '浅色模式', className: '' },
+            { key: 'dark' as ThemeMode, label: '深色模式', className: 'dark' },
+            { key: 'system' as ThemeMode, label: '跟随系统', className: 'system' },
+          ]).map((option) => (
+            <button key={option.key} type="button" className={`dp-theme-option${themeMode === option.key ? ' active' : ''}`} onClick={() => onThemeChange(option.key)} aria-pressed={themeMode === option.key}>
+              <div className={`dp-theme-preview ${option.className}`} />
+              <strong>{option.label}{themeMode === option.key ? ' · 当前' : ''}</strong>
+            </button>
+          ))}
         </div>
       </Card>
+      <Card size="small" title="模型供应商">
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
+          全部走 OpenAI 兼容协议，点击卡片上的「切换」自由更换当前模型，点「配置」填写 Key / 模型 / Base URL。
+          Key 保存在 Windows 凭据管理器（不可用时降级为本地加密文件），界面与日志只显示「已配置 / 未配置」，不回显明文。
+          当前激活：<Tag color="blue">{current?.label ?? st?.provider ?? '-'}</Tag>
+          {current && <Typography.Text type="secondary">{current.defaultModel}{current.keyConfigured ? '' : ' · 未配置 Key'}</Typography.Text>}
+        </Typography.Paragraph>
+
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          {(st?.providers ?? []).map((p: any) => (
+            <div
+              key={p.id}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 10,
+                border: p.active ? '1.5px solid var(--dp-primary)' : '1px solid var(--dp-border)',
+                background: p.active ? 'var(--dp-primary-soft)' : 'transparent',
+                transition: 'border-color .15s',
+              }}
+            >
+              <div style={{
+                width: 38, height: 38, borderRadius: 8, flexShrink: 0,
+                background: 'var(--dp-card)', border: '1px solid var(--dp-border)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+              }}>
+                {PROVIDER_LOGOS[p.id]
+                  ? <img src={PROVIDER_LOGOS[p.id]} alt={p.label} draggable={false} style={{ width: 22, height: 22, display: 'block' }} />
+                  : <span style={{ color: 'var(--dp-text-3)', fontWeight: 700, fontSize: 16 }}>{String(p.label).slice(0, 1)}</span>}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <Space size={6} wrap>
+                  <Typography.Text strong>{p.label}</Typography.Text>
+                  {p.active && <Tag color="blue" style={{ marginInlineEnd: 0 }}>使用中</Tag>}
+                </Space>
+                <div className="dp-mono" style={{ fontSize: 12, color: 'var(--dp-text-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {p.baseUrl || '（未设置 Base URL）'}
+                </div>
+              </div>
+              <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                <div>{p.keyConfigured ? <Tag color="green" style={{ marginInlineEnd: 0 }}>Key 已配置</Tag> : <Tag style={{ marginInlineEnd: 0 }}>未配置 Key</Tag>}</div>
+                <div style={{ fontSize: 12, color: 'var(--dp-text-2)', marginTop: 2 }}>模型 {p.defaultModel || '-'}</div>
+              </div>
+              <Space size={6} style={{ flexShrink: 0 }}>
+                <Button size="small" onClick={() => openConfig(p)}>配置</Button>
+                {!p.active && (
+                  <Button size="small" type="primary" loading={switching === p.id} onClick={() => void switchTo(p.id)}>切换</Button>
+                )}
+              </Space>
+            </div>
+          ))}
+        </Space>
+      </Card>
+
       <Card size="small" title="首次启动引导">
         <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>重跑初始化检查 → 模型配置 → 环境/工具检测 → 项目导入的五步引导。</Typography.Paragraph>
         <Button onClick={rerunOnboarding}>重新运行引导</Button>
       </Card>
+
+      <Modal
+        open={!!editing}
+        onCancel={() => setEditing(null)}
+        onOk={() => void saveConfig()}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={saving}
+        title={`配置模型供应商 — ${editing?.label ?? ''}`}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={10}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            API Key 为必填（出于凭据安全设计，后端不接受空 Key 更新；已配置的 Key 重新保存即可覆盖）。
+          </Typography.Text>
+          <Input.Password placeholder="API Key（sk-...）" value={keyVal} onChange={(e) => setKeyVal(e.target.value)} />
+          <Input
+            placeholder="模型名（留空使用默认）"
+            addonBefore="模型"
+            value={modelVal}
+            onChange={(e) => setModelVal(e.target.value)}
+          />
+          <Input
+            placeholder="Base URL（custom 供应商必填）"
+            addonBefore="地址"
+            value={urlVal}
+            onChange={(e) => setUrlVal(e.target.value)}
+          />
+        </Space>
+      </Modal>
     </Space>
   );
 }
 
 /* ---------- Git 中心 ---------- */
 function GitCenter() {
+  const [projects, setProjects] = useState<any[]>([]);
+  const [projectId, setProjectId] = useState<string | undefined>();
   const [repoPath, setRepoPath] = useState('');
   const [st, setSt] = useState<any>(null);
+  const [branches, setBranches] = useState<string[]>([]);
   const [logRows, setLogRows] = useState<any[]>([]);
   const [diffTxt, setDiffTxt] = useState('');
   const [msg, setMsg] = useState('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
   const enc = (s: string) => encodeURIComponent(s);
+
+  React.useEffect(() => { void api<any[]>('/projects').then(setProjects).catch(() => {}); }, []);
+
+  /** 打开仓库成功后：若来自已导入项目则自动登记（供 push 白名单使用），并拉取分支列表 */
+  const afterOpen = async (p: string, pid?: string) => {
+    await loadStatus(p);
+    setBranches(await api<any[]>(`/git/branches?repoPath=${enc(p)}`));
+    if (pid) {
+      try { await api('/git/register', 'POST', { projectId: pid, repoPath: p }); } catch { /* 已登记过则忽略 */ }
+    }
+  };
 
   const loadStatus = async (p: string) => {
     const s = await api<any>(`/git/status?repoPath=${enc(p)}`);
     setSt(s);
     setLogRows(await api<any[]>(`/git/log?repoPath=${enc(p)}`));
+    setSelected(new Set());
+    setDiffTxt('');
   };
 
-  const open = async () => {
-    if (!repoPath.trim()) return;
+  const open = async (p?: string, pid?: string) => {
+    const path = p ?? repoPath;
+    if (!path.trim()) return;
+    setBusy(true);
     try {
-      await loadStatus(repoPath);
+      await afterOpen(path, pid);
       message.success('仓库已加载');
     } catch { message.error('仓库加载失败（是否为 git 仓库？）'); }
+    finally { setBusy(false); }
+  };
+
+  const pickRepo = async () => {
+    const d = await pickDirectory();
+    if (!d) return;
+    setRepoPath(d);
+    setProjectId(undefined);
+    await open(d, undefined);
+  };
+
+  const switchBranch = async (branch: string) => {
+    const r = await api<any>('/git/checkout', 'POST', { repoPath, branch });
+    if (r.ok) {
+      message.success(`已切换到 ${branch}`);
+      await afterOpen(repoPath, projectId);
+    } else {
+      message.error(r.error ?? r.output ?? '切换失败');
+      await loadStatus(repoPath); // 拉回实际分支
+      setBranches(await api<any[]>(`/git/branches?repoPath=${enc(repoPath)}`));
+    }
   };
 
   const commit = async () => {
-    const r = await api<any>('/git/commit', 'POST', { repoPath, message: msg });
+    if (!msg.trim()) return message.warning('先填写提交说明');
+    const files = selected.size ? [...selected] : null;
+    const r = await api<any>('/git/commit', 'POST', { repoPath, message: msg, files });
     if (r.pendingApproval) message.warning('agent 身份需审批，已生成审批单');
-    else if (r.ok) message.success('已提交');
+    else if (r.ok) message.success(files ? `已提交 ${files.length} 个文件` : '已提交全部变更');
     else message.info(r.output || '无变更可提交');
     setMsg('');
-    await loadStatus(repoPath);
+    await afterOpen(repoPath, projectId);
   };
+
+  const discardFile = (f: string) => confirmDelete(
+    `丢弃「${f}」的修改？`,
+    '已跟踪文件会恢复到最后一次提交的版本；未跟踪的新文件会被删除。此操作不可撤销。',
+    async () => {
+      const r = await api<any>('/git/discard', 'POST', { repoPath, files: [f] });
+      r.ok ? message.success('已丢弃') : message.error(r.errors?.[0] ?? '丢弃失败');
+      await afterOpen(repoPath, projectId);
+    },
+  );
+
+  const revertCommitRow = (hash: string) => confirmDelete(
+    `回滚提交 ${hash}？`,
+    '会生成一条反向提交撤销该次改动（不改写历史），工作区需先保持干净。',
+    async () => {
+      const r = await api<any>('/git/revert', 'POST', { repoPath, hash });
+      r.ok ? message.success(`已回滚 ${hash}`) : message.error(r.error ?? r.output ?? '回滚失败');
+      await afterOpen(repoPath, projectId);
+    },
+  );
+
+  const push = () => confirmDelete(
+    '推送到远程仓库？',
+    '推送走安全策略：远程需已登记（打开项目仓库时自动登记）、保护分支（main/master）工作区必须干净、提交内容含疑似密钥会被拦截。',
+    async () => {
+      const r = await api<any>('/git/push', 'POST', { repoPath, allowPush: true });
+      r.ok ? message.success('推送成功') : message.error(r.error ?? r.output ?? '推送失败');
+    },
+  );
 
   const showDiff = async (f?: string) => {
     const d = await api<any>(`/git/diff?repoPath=${enc(repoPath)}${f ? '&file=' + enc(f) : ''}`);
     setDiffTxt(d.diff || '（无未暂存修改）');
   };
 
+  const currentBranch = branches.find((b) => !b.startsWith('remotes/') && !b.startsWith('* ')) && branches.find((b) => b.replace('* ', '') === st?.branch)
+    ? st?.branch
+    : st?.branch;
+
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
-      <Card size="small" title="打开仓库">
-        <Space.Compact style={{ width: '100%' }}>
-          <Input placeholder="仓库绝对路径" value={repoPath} onChange={(e) => setRepoPath(e.target.value)} onPressEnter={open} />
-          <Button type="primary" onClick={open}>打开</Button>
-        </Space.Compact>
+      <Card size="small" title="仓库入口" extra={<span className="dp-desc">支持项目仓库、目录选择或手动路径</span>}>
+        <Space wrap>
+          <Select
+            showSearch
+            allowClear
+            placeholder="从已导入项目选择"
+            style={{ width: 320 }}
+            value={projectId}
+            onChange={(v, opt: any) => {
+              setProjectId(v);
+              if (v) {
+                const p = projects.find((x) => x.id === v);
+                if (p?.root_path) { setRepoPath(p.root_path); void open(p.root_path, v); }
+              }
+            }}
+            options={projects.map((p) => ({ value: p.id, label: `${p.name}（${p.root_path}）` }))}
+            optionFilterProp="label"
+          />
+          <Button onClick={() => void pickRepo()}>选择目录…</Button>
+          <Input placeholder="或手输仓库绝对路径" value={repoPath} onChange={(e) => setRepoPath(e.target.value)} onPressEnter={() => void open()} style={{ width: 320 }} />
+          <Button type="primary" loading={busy} onClick={() => void open()}>打开</Button>
+        </Space>
       </Card>
       {st && (
         <>
-          <Card size="small" title={`工作区 — ${st.branch} ${st.clean ? '（干净）' : `（${st.files.length} 个变更）`}`} extra={<Button size="small" onClick={() => void loadStatus(repoPath)}>刷新</Button>}>
+          <Card
+            size="small"
+            title={<Space size={8} wrap><span>工作区</span><Tag color="blue">{st.branch}</Tag><StatusTag status={st.clean ? 'Completed' : 'Pending'} text={st.clean ? '工作区干净' : `${st.files.length} 个变更`}/></Space>}
+            extra={(
+              <Space>
+                <Select
+                  size="small"
+                  showSearch
+                  value={currentBranch}
+                  style={{ width: 200 }}
+                  placeholder="切换分支"
+                  onChange={(b) => void switchBranch(b)}
+                  options={branches.filter((b) => !b.startsWith('remotes/')).map((b) => ({ value: b.replace('* ', ''), label: b.replace('* ', '') }))}
+                  optionFilterProp="label"
+                />
+                <Button size="small" danger disabled={!st.clean} onClick={push} title={st.clean ? '推送到远程' : '推送前需保持工作区干净'}>推送到远程</Button>
+                <Button size="small" onClick={() => void afterOpen(repoPath, projectId)}>刷新</Button>
+              </Space>
+            )}
+          >
             <List size="small" dataSource={st.files} renderItem={(f: any) => (
-              <List.Item actions={[<Button key="d" size="small" onClick={() => void showDiff(f.path)}>Diff</Button>]}>
+              <List.Item actions={[
+                <Button key="d" size="small" onClick={() => void showDiff(f.path)}>Diff</Button>,
+                <Button key="x" size="small" danger onClick={() => discardFile(f.path)}>丢弃</Button>,
+                <Checkbox
+                  key="c"
+                  checked={selected.has(f.path)}
+                  onChange={(e) => {
+                    const n = new Set(selected);
+                    e.target.checked ? n.add(f.path) : n.delete(f.path);
+                    setSelected(n);
+                  }}
+                >
+                  提交
+                </Checkbox>,
+              ]}>
                 <Space><Tag color={f.status === 'M' ? 'orange' : f.status === '??' ? 'default' : 'blue'}>{f.status || 'M'}</Tag>{f.path}</Space>
               </List.Item>
             )} />
             <Space style={{ marginTop: 8 }}>
               <Input placeholder="提交说明" value={msg} onChange={(e) => setMsg(e.target.value)} style={{ width: 360 }} onPressEnter={commit} />
-              <Button type="primary" onClick={commit}>提交全部</Button>
+              <Button type="primary" onClick={commit}>{selected.size ? `提交选中（${selected.size}）` : '提交全部'}</Button>
               <Button onClick={() => void showDiff()}>整体 Diff</Button>
             </Space>
           </Card>
-          {diffTxt && <Card size="small" title="Diff"><pre style={{ maxHeight: 280, overflow: 'auto', fontSize: 12 }}>{diffTxt}</pre></Card>}
+          {diffTxt && <Card size="small" title="Diff"><pre className="dp-code-block" style={{ maxHeight: 280 }}>{diffTxt}</pre></Card>}
           <Card size="small" title="提交历史">
             <Table rowKey="hash" size="small" pagination={false} dataSource={logRows}
               columns={[
@@ -605,84 +759,12 @@ function GitCenter() {
                 { title: '作者', dataIndex: 'author', width: 120 },
                 { title: '时间', dataIndex: 'date', width: 200 },
                 { title: '说明', dataIndex: 'subject' },
+                { title: '操作', width: 110, render: (_, r: any) => (
+                  <Button size="small" danger onClick={() => revertCommitRow(r.hash)}>回滚此提交</Button>
+                ) },
               ]} />
           </Card>
         </>
-      )}
-    </Space>
-  );
-}
-
-/* ---------- 代码工作区（Monaco） ---------- */
-const LANG_BY_EXT: Record<string, string> = {
-  ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', json: 'json',
-  py: 'python', java: 'java', go: 'go', rs: 'rust', php: 'php', md: 'markdown',
-  html: 'html', css: 'css', xml: 'xml', yaml: 'yaml', yml: 'yaml', bat: 'bat', ps1: 'powershell',
-};
-
-function CodeWorkspace() {
-  const [root, setRoot] = useState('C:/Users/administer/WorkBuddy/DevPilot');
-  const [entries, setEntries] = useState<any[]>([]);
-  const [openPath, setOpenPath] = useState<string | null>(null);
-  const [content, setContent] = useState('');
-  const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  const loadDir = React.useCallback(async (dir: string) => {
-    const r = await api<{ entries: any[] }>('/workspace/dir?dirPath=' + encodeURIComponent(dir));
-    setEntries(r.entries);
-    setRoot(dir);
-  }, []);
-  useEffect(() => { void loadDir(root); }, [loadDir]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const openFile = async (p: string) => {
-    const r = await api<{ content: string }>('/workspace/file?filePath=' + encodeURIComponent(p));
-    setOpenPath(p);
-    setContent(r.content);
-    setDirty(false);
-  };
-
-  const save = async () => {
-    if (!openPath) return;
-    setSaving(true);
-    const r = await api<{ ok: boolean; error?: string }>('/workspace/file', 'POST', { filePath: openPath, content });
-    setSaving(false);
-    if (r.ok) { setDirty(false); message.success('已保存（含自动备份）'); }
-    else message.error('保存失败：' + r.error);
-  };
-
-  return (
-    <Space direction="vertical" style={{ width: '100%' }}>
-      <Card size="small" title="目录浏览">
-        <Space.Compact style={{ width: '70%' }}>
-          <Input value={root} onChange={(e) => setRoot(e.target.value)} onPressEnter={() => void loadDir(root)} />
-          <Button onClick={() => void loadDir(root)}>打开</Button>
-        </Space.Compact>
-        <List size="small" style={{ maxHeight: 260, overflow: 'auto' }} dataSource={entries}
-          renderItem={(e) => (
-            <List.Item
-              style={{ cursor: 'pointer', padding: '2px 8px' }}
-              onClick={() => (e.isDir ? void loadDir(e.path) : void openFile(e.path))}
-            >
-              <Typography.Text type={e.isDir ? 'warning' : undefined}>
-                {e.isDir ? '📁' : '📄'} {e.name}
-              </Typography.Text>
-            </List.Item>
-          )} />
-      </Card>
-      {openPath && (
-        <Card size="small" title={openPath + (dirty ? ' ●' : '')} extra={<Button type="primary" onClick={save} loading={saving} disabled={!dirty}>保存</Button>}>
-          <div style={{ border: '1px solid #eee' }}>
-            <MonacoEditor
-              height="420px"
-              language={LANG_BY_EXT[openPath.split('.').pop() || ''] ?? 'plaintext'}
-              value={content}
-              onChange={(v) => { setContent(v ?? ''); setDirty(true); }}
-              theme="vs"
-              options={{ minimap: { enabled: false }, fontSize: 13, automaticLayout: true }}
-            />
-          </div>
-        </Card>
       )}
     </Space>
   );
@@ -735,7 +817,7 @@ function DatabasesCenter() {
           columns={[
             { title: '服务', dataIndex: 'name' },
             { title: '端口', dataIndex: 'port' },
-            { title: '端口', dataIndex: 'portOpen', render: (v) => <Tag color={v ? 'green' : 'default'}>{v ? '开放' : '关闭'}</Tag> },
+            { title: '端口状态', dataIndex: 'portOpen', render: (v) => <Tag color={v ? 'green' : 'default'}>{v ? '开放' : '关闭'}</Tag> },
             { title: 'Windows 服务', dataIndex: 'winService', render: (v, r) => v ? <Tag color={r.winServiceRunning ? 'green' : 'default'}>{v} {r.winServiceRunning ? '运行中' : '已安装'}</Tag> : '-' },
           ]} />
       </Card>
@@ -809,9 +891,13 @@ function ExternalToolsPage() {
   useEffect(() => { void load(); }, [load]);
 
   const openIde = async (toolId: string) => {
-    if (!projectPath.trim()) return message.warning('先填写项目路径');
+    if (!projectPath.trim()) return message.warning('先选择项目目录');
     const r = await api<any>('/external-tools/open-ide', 'POST', { toolId, projectPath });
     r.ok ? message.success(`已在 ${r.tool ?? toolId} 中打开`) : message.error(r.error);
+  };
+  const chooseProjectDir = async () => {
+    const dir = await pickDirectory();
+    if (dir) setProjectPath(dir);
   };
   const openUrl = async (toolId?: string) => {
     if (!url.trim()) return message.warning('先填写 URL');
@@ -841,7 +927,8 @@ function ExternalToolsPage() {
       </Card>
       <Card size="small" title="IDE 打开项目">
         <Space.Compact style={{ width: '70%' }}>
-          <Input placeholder="项目绝对路径" value={projectPath} onChange={(e) => setProjectPath(e.target.value)} />
+          <Button onClick={() => void chooseProjectDir()}>选择项目目录…</Button>
+          <Input readOnly placeholder="点击左侧按钮从资源管理器选择" value={projectPath} style={{ flex: 1 }} />
         </Space.Compact>
         <Space style={{ marginTop: 8 }}>
           {tools.filter((t) => t.kind === 'ide' && t.status === 'ok').map((t) => (
@@ -864,7 +951,7 @@ function ExternalToolsPage() {
         </Space>
         <Space wrap>
           {avds.map((a) => (
-            <Tag key={a} color="blue" style={{ cursor: 'pointer' }} onClick={() => void launch(a)}>{a} ▶ 启动</Tag>
+            <Tag key={a} color="blue" style={{ cursor: 'pointer' }} onClick={() => void launch(a)}>{a} · 启动</Tag>
           ))}
         </Space>
       </Card>
@@ -928,7 +1015,7 @@ function CommandActionsCard({ tools }: { tools: any[] }) {
           ]} />
       )}
       {runResult && !runResult.running && (
-        <pre style={{ maxHeight: 220, overflow: 'auto', background: 'rgba(0,0,0,0.04)', padding: 8, borderRadius: 4, fontSize: 12 }}>
+        <pre className="dp-code-block" style={{ maxHeight: 220 }}>
           {runResult.error ? `错误：${runResult.error}` : `exit=${runResult.exitCode}\n${runResult.stdout || ''}${runResult.stderr ? '\n[stderr] ' + runResult.stderr : ''}`}
         </pre>
       )}
@@ -1051,7 +1138,7 @@ function BackupCenterPage() {
       content: (
         <div>
           <p>当前数据库会被 <strong>{createdAt}</strong> 的快照整体替换，替换后需要重启应用生效。</p>
-          <p style={{ color: '#B45309' }}>这份备份之后产生的项目、任务与配置改动都会丢失。建议先点「立即备份」留存当前状态。</p>
+          <p style={{ color: 'var(--dp-warning)' }}>这份备份之后产生的项目、任务与配置改动都会丢失。建议先点「立即备份」留存当前状态。</p>
         </div>
       ),
       okText: '覆盖并恢复',
@@ -1242,7 +1329,7 @@ function FirstRunWizard({ onFinish }: { onFinish: () => void }) {
   };
 
   const doImport = async () => {
-    if (!importPath.trim()) return message.warning('请填写项目根目录路径');
+    if (!importPath.trim()) return message.warning('请先选择项目根目录');
     setImporting(true);
     try {
       const r = await api<{ projectId: string; analysis: any }>('/projects/import', 'POST', { source: 'folder', rootPath: importPath });
@@ -1264,7 +1351,7 @@ function FirstRunWizard({ onFinish }: { onFinish: () => void }) {
   return (
     <div className="dp-wizard-scroll">
       <div style={{ maxWidth: 720, margin: '0 auto' }}>
-      <Card>
+      <Card className="dp-wizard-card">
         <Typography.Title level={3} style={{ marginTop: 0 }}>欢迎使用 DevPilot</Typography.Title>
         <Typography.Paragraph type="secondary">首次启动引导将带你完成 5 步初始化配置。</Typography.Paragraph>
         <Steps current={step} items={steps.map((s) => ({ key: s.title, title: s.title }))} style={{ margin: '16px 0 24px' }} />
@@ -1314,10 +1401,11 @@ function FirstRunWizard({ onFinish }: { onFinish: () => void }) {
         )}
         {step === 4 && (
           <Space direction="vertical" style={{ width: '100%' }}>
-            <Typography.Paragraph type="secondary">导入第一个项目（可跳过，之后在「项目管理」页随时导入）：</Typography.Paragraph>
+            <Typography.Paragraph type="secondary">导入第一个项目（可跳过，之后在「工作台」随时导入）：</Typography.Paragraph>
             <Space.Compact style={{ width: '100%' }}>
-              <Input placeholder="项目根目录绝对路径" value={importPath} onChange={(e) => setImportPath(e.target.value)} onPressEnter={doImport} />
-              <Button type="primary" loading={importing} onClick={doImport}>导入并识别</Button>
+              <Button onClick={async () => { const d = await pickDirectory(); if (d) setImportPath(d); }}>选择项目目录…</Button>
+              <Input readOnly placeholder="点击左侧按钮从资源管理器选择" value={importPath} style={{ flex: 1 }} />
+              <Button type="primary" loading={importing} disabled={!importPath.trim()} onClick={doImport}>导入并识别</Button>
             </Space.Compact>
           </Space>
         )}
@@ -1337,44 +1425,153 @@ function FirstRunWizard({ onFinish }: { onFinish: () => void }) {
 /* ---------- Agent 管理中心（二阶段 #1） ---------- */
 function AgentsCenterPage() {
   const [agents, setAgents] = useState<any[]>([]);
-  const [activeTasks, setActiveTasks] = useState<any[]>([]);
+  const [tasks, setTasks] = useState<any[]>([]);
+  const [projects, setProjects] = useState<any[]>([]);
+  const [approvals, setApprovals] = useState<any[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<any>(null);
+  const [goal, setGoal] = useState('');
+  const [projectId, setProjectId] = useState<string | undefined>();
+  const [creating, setCreating] = useState(false);
+  const [busy, setBusy] = useState(false);
+
   const load = React.useCallback(async () => {
-    setAgents(await api('/agents'));
-    const tasks = await api<any[]>('/tasks');
-    setActiveTasks(tasks.filter((t) => !['Completed', 'Failed', 'Cancelled'].includes(t.status)));
-  }, []);
-  useEffect(() => { void load(); const t = setInterval(load, 4000); return () => clearInterval(t); }, [load]);
+    const [agentRows, taskRows, projectRows, approvalRows] = await Promise.all([
+      api<any[]>('/agents'), api<any[]>('/tasks'), api<any[]>('/projects'), api<any[]>('/approvals'),
+    ]);
+    setAgents(agentRows); setProjects(projectRows); setApprovals(approvalRows);
+    setTasks(taskRows);
+    if (!selectedId && taskRows.length) setSelectedId(taskRows[0].id);
+  }, [selectedId]);
+
+  const loadDetail = React.useCallback(async () => {
+    if (!selectedId) { setDetail(null); return; }
+    try { setDetail(await api(`/tasks/${selectedId}`)); } catch { setDetail(null); }
+  }, [selectedId]);
+
+  useEffect(() => { void load(); const timer = setInterval(load, 4000); return () => clearInterval(timer); }, [load]);
+  useEffect(() => { void loadDetail(); const timer = setInterval(loadDetail, 4000); return () => clearInterval(timer); }, [loadDetail]);
+
+  const createTask = async () => {
+    if (!goal.trim()) { message.warning('请先描述本次 Agent 任务目标'); return; }
+    setCreating(true);
+    try {
+      const created = await api<any>('/tasks', 'POST', { goal: goal.trim(), projectId });
+      const id = created.id ?? created.taskId ?? created.task?.id;
+      if (!id) throw new Error('后端未返回任务 ID');
+      setGoal(''); setSelectedId(id);
+      message.success('Agent 任务已创建，可在执行区启动');
+      await load();
+    } catch (e: any) { message.error('创建失败：' + (e?.message ?? String(e))); }
+    finally { setCreating(false); }
+  };
+
+  const taskAction = async (action: 'run' | 'pause' | 'resume' | 'cancel') => {
+    if (!selectedId || busy) return;
+    setBusy(true);
+    try {
+      await api(`/tasks/${selectedId}/${action}`, 'POST');
+      message.success({ run: '任务已开始执行', pause: '任务已暂停', resume: '任务已恢复', cancel: '任务已取消' }[action]);
+      await Promise.all([load(), loadDetail()]);
+    } catch (e: any) { message.error(e?.message ?? String(e)); }
+    finally { setBusy(false); }
+  };
+
+  const actApproval = async (id: string, approve: boolean) => {
+    await api(`/approvals/${id}/${approve ? 'approve' : 'reject'}`, 'POST');
+    message.success(approve ? '已批准操作' : '已拒绝操作');
+    await Promise.all([load(), loadDetail()]);
+  };
+
+  const selected = tasks.find((task) => task.id === selectedId) ?? detail?.task;
+  const subtasks: any[] = detail?.subtasks ?? [];
+  const checkpoints: any[] = detail?.checkpoints ?? [];
+  const parseJson = (value: any) => {
+    if (value == null) return null;
+    if (typeof value !== 'string') return value;
+    try { return JSON.parse(value); } catch { return value; }
+  };
+  const capabilities = (agent: any): string[] => {
+    const value = parseJson(agent.capabilities_json);
+    return Array.isArray(value) ? value : [];
+  };
 
   return (
-    <Space direction="vertical" style={{ width: '100%' }}>
-      <Card size="small" title="注册 Agent">
-        <Table rowKey="id" size="small" pagination={false} dataSource={agents}
-          columns={[
-            { title: 'ID', dataIndex: 'id' },
-            { title: '名称', dataIndex: 'name' },
-            { title: '类型', dataIndex: 'type', render: (t) => <Tag color="blue">{t}</Tag> },
-            { title: '来源', dataIndex: 'origin', render: (o) => <Tag color={o === 'builtin' ? 'default' : 'green'}>{o === 'builtin' ? '内置' : o}</Tag> },
-            { title: '版本', dataIndex: 'version' },
-            { title: '能力', dataIndex: 'capabilities_json', render: (s) => {
-              try { return (JSON.parse(s) as string[]).map((c) => <Tag key={c}>{c}</Tag>); } catch { return s; }
-            } },
-            { title: '状态', dataIndex: 'status', render: (s) => <Tag color={s === 'registered' ? 'green' : 'default'}>{s}</Tag> },
-          ]} />
-      </Card>
-      <Card size="small" title={`协作过程（进行中任务 ${activeTasks.length}）`}>
-        <Table rowKey="id" size="small" pagination={false} dataSource={activeTasks}
-          locale={{ emptyText: '当前无进行中的任务' }}
-          columns={[
-            { title: '目标', dataIndex: 'input_summary', ellipsis: true },
-            { title: '状态', dataIndex: 'status', render: (s) => <Tag color={statusColor[s] ?? 'default'}>{s}</Tag> },
-            { title: '最近事件', dataIndex: 'result_summary', ellipsis: true },
-            { title: '开始时间', dataIndex: 'started_at' },
-          ]} />
-        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
-          Supervisor 规划并顺序派发子任务（project-analyzer → diagnostic → repair → validation），子任务经权限网关执行；审批/暂停/追问事件实时推送。
-        </Typography.Paragraph>
-      </Card>
-    </Space>
+    <div>
+      <PageHeader eyebrow="AI orchestration" title="Agent 工作区" description="创建任务、追踪规划与工具执行，并在同一工作区完成审批。" extra={<><StatusTag status={agents.length ? 'Running' : 'Unknown'} text={`${agents.length} 个 Agent`}/><Button onClick={() => void Promise.all([load(), loadDetail()])}>刷新</Button></>}/>
+      <div className="dp-agent-workspace">
+        <aside className="dp-agent-sidebar">
+          <div className="dp-agent-pane-title"><span>任务会话</span><span>{tasks.length}</span></div>
+          {tasks.map((task) => (
+            <button key={task.id} className={`dp-agent-session${selectedId === task.id ? ' active' : ''}`} onClick={() => setSelectedId(task.id)}>
+              <span className="dp-agent-session-title">{task.input_summary || '未命名任务'}</span>
+              <span className="dp-agent-session-meta"><span>{task.status}</span><span>{formatTime(task.created_at)}</span></span>
+            </button>
+          ))}
+          {tasks.length === 0 && <div className="dp-state-empty"><div className="dp-state-title">暂无会话</div><p className="dp-desc">在右侧输入目标开始</p></div>}
+          <div className="dp-agent-pane-title"><span>常用 Agent</span><span>{agents.length}</span></div>
+          {agents.map((agent) => <div className="dp-agent-session" key={agent.id}><span className="dp-agent-session-title">{agent.name}</span><span className="dp-agent-session-meta"><span>{agent.type}</span><span>{agent.status}</span></span></div>)}
+        </aside>
+
+        <main className="dp-agent-main">
+          {selected ? <div className="dp-agent-conversation">
+            <div className="dp-agent-task-head">
+              <StatusTag status={selected.status}/>
+              <h3>{selected.input_summary}</h3>
+              <p>任务 {String(selected.id).slice(0, 8)} · 创建于 {formatTime(selected.created_at)}</p>
+              <Space size={6} style={{ marginTop: 14 }} wrap>
+                {['Pending', 'WaitingInput'].includes(selected.status) && <Button type="primary" size="small" loading={busy} onClick={() => void taskAction('run')}>开始执行</Button>}
+                {['Running', 'Preparing'].includes(selected.status) && <Button size="small" loading={busy} onClick={() => void taskAction('pause')}>暂停</Button>}
+                {selected.status === 'Paused' && <Button type="primary" size="small" loading={busy} onClick={() => void taskAction('resume')}>恢复执行</Button>}
+                {['Pending', 'Preparing', 'Running', 'Paused', 'WaitingApproval', 'WaitingInput'].includes(selected.status) && <Button danger size="small" loading={busy} onClick={() => void taskAction('cancel')}>取消任务</Button>}
+              </Space>
+            </div>
+            <div className="dp-agent-timeline">
+              <div className="dp-agent-pane-title" style={{ padding: '0 0 10px' }}><span>规划与执行进度</span><span>{subtasks.length} 个子任务</span></div>
+              {subtasks.map((subtask, index) => (
+                <div className="dp-agent-step" key={subtask.id ?? index}>
+                  <div className="dp-agent-step-head"><span className="dp-agent-step-title">{String(index + 1).padStart(2, '0')} · {subtask.assigned_agent ?? 'Agent'}</span><StatusTag status={subtask.status}/></div>
+                  <pre>{typeof parseJson(subtask.input_json) === 'string' ? parseJson(subtask.input_json) : JSON.stringify(parseJson(subtask.input_json), null, 2)}</pre>
+                  {(subtask.result_summary || subtask.result_json) && <pre>{subtask.result_summary ?? JSON.stringify(parseJson(subtask.result_json), null, 2)}</pre>}
+                </div>
+              ))}
+              {subtasks.length === 0 && <StateBlock empty emptyText={selected.status === 'Pending' ? '任务已就绪，点击开始执行生成规划' : '当前任务尚无子任务记录'}>{null}</StateBlock>}
+              {selected.result_summary && <div className="dp-agent-step"><div className="dp-agent-step-head"><span className="dp-agent-step-title">任务结果</span><StatusTag status={selected.status}/></div><pre>{selected.result_summary}</pre></div>}
+            </div>
+          </div> : <div className="dp-agent-empty"><div><div className="dp-agent-empty-mark">AI</div><Typography.Title level={4}>从一个明确目标开始</Typography.Title><p className="dp-desc">选择项目并描述任务。Supervisor 会规划步骤，执行记录将在这里呈现。</p></div></div>}
+          <div className="dp-agent-composer">
+            <Space.Compact style={{ width: '100%', marginBottom: 8 }}>
+              <Select allowClear placeholder="关联项目（可选）" style={{ width: '100%' }} value={projectId} onChange={setProjectId} options={projects.map((project) => ({ value: project.id, label: project.name }))}/>
+            </Space.Compact>
+            <Input.TextArea rows={3} value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="描述希望 Agent 完成的任务，例如：分析当前项目的启动失败原因并给出修复方案…"/>
+            <div className="dp-agent-composer-note"><span>创建后由你确认开始执行</span><Button type="primary" size="small" loading={creating} disabled={!goal.trim()} onClick={() => void createTask()}>新建任务会话</Button></div>
+          </div>
+        </main>
+
+        <aside className="dp-agent-inspector">
+          <div className="dp-agent-pane-title"><span>当前状态</span>{selected && <StatusTag status={selected.status}/>}</div>
+          <div className="dp-agent-detail-block">
+            <h4>执行上下文</h4>
+            <div className="dp-agent-kv"><span>任务 ID</span><strong>{selected?.id ?? '—'}</strong></div>
+            <div className="dp-agent-kv"><span>关联项目</span><strong>{projects.find((project) => project.id === (selected?.project_id ?? selected?.projectId))?.name ?? '未关联'}</strong></div>
+            <div className="dp-agent-kv"><span>开始时间</span><strong>{selected?.started_at ?? '尚未开始'}</strong></div>
+            <div className="dp-agent-kv"><span>检查点</span><strong>{checkpoints.length} 个</strong></div>
+          </div>
+          <div className="dp-agent-pane-title"><span>审批操作</span><span>{approvals.length}</span></div>
+          <div style={{ padding: '0 12px' }}>
+            {approvals.map((approval) => <div className="dp-agent-approval" key={approval.id} style={{ marginBottom: 8 }}><strong style={{ fontSize: 11 }}>{approval.action_summary}</strong><p className="dp-desc">{approval.requester} · {approval.risk_level}</p><Space size={6}><Button size="small" type="primary" onClick={() => void actApproval(approval.id, true)}>批准</Button><Button size="small" danger onClick={() => void actApproval(approval.id, false)}>拒绝</Button></Space></div>)}
+            {approvals.length === 0 && <p className="dp-desc">当前没有等待审批的操作。</p>}
+          </div>
+          <div className="dp-agent-pane-title"><span>工具与文件记录</span><span>{subtasks.length}</span></div>
+          <div style={{ padding: '0 12px' }}>
+            {subtasks.map((subtask, index) => <div className="dp-agent-detail-block" style={{ margin: '0 0 8px' }} key={subtask.id ?? index}><h4>{subtask.assigned_agent ?? `子任务 ${index + 1}`}</h4><div className="dp-agent-kv"><span>状态</span><strong>{subtask.status}</strong></div><div className="dp-agent-kv"><span>工具 / 输入</span><strong title={String(subtask.input_json ?? '')}>{subtask.input_json ?? '—'}</strong></div><div className="dp-agent-kv"><span>结果</span><strong title={String(subtask.result_summary ?? '')}>{subtask.result_summary ?? '尚无结果'}</strong></div></div>)}
+            {subtasks.length === 0 && <p className="dp-desc">工具调用和文件变更将在执行后记录在这里。</p>}
+          </div>
+          <div className="dp-agent-pane-title"><span>Agent 能力</span></div>
+          <div style={{ padding: '0 12px 16px' }}>{agents.map((agent) => <div className="dp-agent-detail-block" style={{ margin: '0 0 8px' }} key={agent.id}><h4>{agent.name} <Tag>{agent.version}</Tag></h4><div>{capabilities(agent).map((capability) => <Tag key={capability}>{capability}</Tag>)}</div></div>)}</div>
+        </aside>
+      </div>
+    </div>
   );
 }
 
@@ -1408,28 +1605,32 @@ function MemoryPage() {
 
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
-      <Space wrap>
-        <Select allowClear placeholder="全部 scope" style={{ width: 140 }} value={scope}
-          onChange={(v) => setScope(v)}
-          options={['global', 'project', 'task'].map((v) => ({ value: v, label: v }))} />
-        <Input.Search placeholder="关键词检索（空格分词 AND 匹配）" style={{ width: 320 }} value={kw}
-          onChange={(e) => setKw(e.target.value)} onSearch={() => void load()} allowClear />
-        <Button onClick={() => { setKw(''); setScope(undefined); }}>重置</Button>
-      </Space>
-      <Space.Compact style={{ width: '100%' }}>
-        <Input placeholder="手动沉淀一条记忆（global scope）" value={newContent} onChange={(e) => setNewContent(e.target.value)} onPressEnter={create} />
-        <Button type="primary" onClick={create}>保存</Button>
-      </Space.Compact>
-      <Table rowKey="id" size="small" dataSource={rows}
-        columns={[
-          { title: 'Scope', dataIndex: 'scope', width: 80, render: (s) => <Tag color={s === 'global' ? 'purple' : s === 'project' ? 'blue' : 'green'}>{s}</Tag> },
-          { title: '内容', dataIndex: 'content_ref', ellipsis: true },
-          { title: '来源', dataIndex: 'source', width: 100 },
-          { title: '置信度', dataIndex: 'confidence', width: 80, render: (v) => Number(v).toFixed(2) },
-          { title: '关联', width: 160, render: (_, r) => r.project_id ? `项目 ${String(r.project_id).slice(0, 8)}` : r.task_id ? `任务 ${String(r.task_id).slice(0, 8)}` : '-' },
-          { title: '创建时间', dataIndex: 'created_at', width: 180 },
-          { title: '操作', width: 70, render: (_, r) => <Button size="small" danger onClick={() => remove(r.id)}>删除</Button> },
-        ]} />
+      <SectionCard title="检索记忆" extra={<span className="dp-desc">{rows.length} 条记录</span>}>
+        <Space wrap style={{ marginBottom: 12 }}>
+          <Select allowClear placeholder="全部 scope" style={{ width: 140 }} value={scope}
+            onChange={(v) => setScope(v)}
+            options={['global', 'project', 'task'].map((v) => ({ value: v, label: v }))} />
+          <Input.Search placeholder="关键词检索（空格分词 AND 匹配）" style={{ width: 320 }} value={kw}
+            onChange={(e) => setKw(e.target.value)} onSearch={() => void load()} allowClear />
+          <Button onClick={() => { setKw(''); setScope(undefined); }}>重置</Button>
+        </Space>
+        <Table rowKey="id" size="small" dataSource={rows}
+          columns={[
+            { title: 'Scope', dataIndex: 'scope', width: 80, render: (s) => <Tag color={s === 'global' ? 'purple' : s === 'project' ? 'blue' : 'green'}>{s}</Tag> },
+            { title: '内容', dataIndex: 'content_ref', ellipsis: true },
+            { title: '来源', dataIndex: 'source', width: 100 },
+            { title: '置信度', dataIndex: 'confidence', width: 80, render: (v) => Number(v).toFixed(2) },
+            { title: '关联', width: 160, render: (_, r) => r.project_id ? `项目 ${String(r.project_id).slice(0, 8)}` : r.task_id ? `任务 ${String(r.task_id).slice(0, 8)}` : '-' },
+            { title: '创建时间', dataIndex: 'created_at', width: 180 },
+            { title: '操作', width: 70, render: (_, r) => <Button size="small" danger onClick={() => remove(r.id)}>删除</Button> },
+          ]} />
+      </SectionCard>
+      <SectionCard title="手动沉淀">
+        <Space.Compact style={{ width: '100%' }}>
+          <Input placeholder="记录一条跨会话有用的事实、偏好或决策（保存到 global scope）" value={newContent} onChange={(e) => setNewContent(e.target.value)} onPressEnter={create} />
+          <Button type="primary" onClick={create}>保存</Button>
+        </Space.Compact>
+      </SectionCard>
     </Space>
   );
 }
@@ -1537,16 +1738,16 @@ function WorkflowTopology({ steps }: { steps: any[] }) {
   const height = Math.max(...[...pos.values()].map((p) => p.y), 0) + TOPO_H + 56;
 
   const nodeColor = (t: string): { fill: string; stroke: string } =>
-    t === 'condition' ? { fill: '#f9f0ff', stroke: '#b37feb' }
-    : t === 'notify' ? { fill: '#e6fffb', stroke: '#5cdbd3' }
-    : t === 'task' ? { fill: '#fff7e6', stroke: '#ffd591' }
-    : { fill: '#f5f5f5', stroke: '#d9d9d9' };
+    t === 'condition' ? { fill: 'var(--dp-primary-soft)', stroke: 'var(--dp-primary)' }
+    : t === 'notify' ? { fill: 'var(--dp-success-bg)', stroke: 'var(--dp-success)' }
+    : t === 'task' ? { fill: 'var(--dp-warning-bg)', stroke: 'var(--dp-warning)' }
+    : { fill: 'var(--dp-card)', stroke: 'var(--dp-border-strong)' };
 
   return (
-    <svg width="100%" viewBox={`0 0 ${width} ${height}`} style={{ background: '#fafafa', borderRadius: 6 }}>
+    <div className="dp-workflow-canvas"><svg width="100%" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="工作流拓扑图">
       <defs>
         <marker id="topo-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
-          <path d="M0,0 L7,3 L0,6 Z" fill="#8c8c8c" />
+          <path d="M0,0 L7,3 L0,6 Z" className="dp-workflow-arrow" />
         </marker>
       </defs>
       {edges.map((e, i) => {
@@ -1562,7 +1763,7 @@ function WorkflowTopology({ steps }: { steps: any[] }) {
           const x1 = p1.x + TOPO_W, y1 = p1.y + TOPO_H / 2, x2 = p2.x, y2 = p2.y + TOPO_H / 2;
           path = x2 - x1 > 24 ? `M ${x1} ${y1} C ${x1 + 40} ${y1}, ${x2 - 40} ${y2}, ${x2} ${y2}` : `M ${x1} ${y1} C ${x1 + 40} ${y1}, ${x2 - 40} ${y2}, ${x2} ${y2}`;
         }
-        const color = e.label === 'T' ? '#52c41a' : e.label === 'F' ? '#ff4d4f' : '#8c8c8c';
+        const color = e.label === 'T' ? 'var(--dp-success)' : e.label === 'F' ? 'var(--dp-danger)' : 'var(--dp-text-3)';
         const lx = (p1.x + TOPO_W + p2.x) / 2, ly = (p1.y + p2.y) / 2 + (isBack ? 26 : -6);
         return (
           <g key={i}>
@@ -1577,16 +1778,16 @@ function WorkflowTopology({ steps }: { steps: any[] }) {
         return (
           <g key={s.id}>
             <rect x={p.x} y={p.y} width={TOPO_W} height={TOPO_H} rx={8} fill={c.fill} stroke={c.stroke} />
-            <text x={p.x + 12} y={p.y + 21} fontSize={13} fontWeight={600} fill="#262626">{s.id}</text>
-            <text x={p.x + 12} y={p.y + 39} fontSize={11} fill="#8c8c8c">{s.type}</text>
+            <text x={p.x + 12} y={p.y + 21} fontSize={13} fontWeight={600} className="dp-workflow-node-text">{s.id}</text>
+            <text x={p.x + 12} y={p.y + 39} fontSize={11} className="dp-workflow-node-type">{s.type}</text>
           </g>
         );
       })}
       <g>
-        <rect x={pos.get('__end__')!.x} y={endY} width={TOPO_W} height={TOPO_H} rx={24} fill="#fff1f0" stroke="#ffa39e" strokeDasharray="4 3" />
-        <text x={pos.get('__end__')!.x + 12} y={endY + 31} fontSize={13} fill="#cf1322">结束 end</text>
+        <rect x={pos.get('__end__')!.x} y={endY} width={TOPO_W} height={TOPO_H} rx={24} fill="var(--dp-danger-bg)" stroke="var(--dp-danger)" strokeDasharray="4 3" />
+        <text x={pos.get('__end__')!.x + 12} y={endY + 31} fontSize={13} fill="var(--dp-danger)">结束 end</text>
       </g>
-    </svg>
+    </svg></div>
   );
 }
 
@@ -1674,16 +1875,16 @@ function WorkflowsPage() {
                 {(detail.definition?.steps ?? []).map((s: any) => (
                   <Card key={s.id} size="small" type="inner" title={`${s.id} · ${s.type}`}
                     extra={s.gotoOnTrue ? <Tag color="purple">T→{s.gotoOnTrue}{s.gotoOnFalse ? ` / F→${s.gotoOnFalse}` : ''}</Tag> : null}>
-                    <pre style={{ margin: 0, maxHeight: 120, overflow: 'auto', fontSize: 12 }}>{JSON.stringify(s, null, 2)}</pre>
+                    <pre className="dp-code-block" style={{ maxHeight: 160, margin: 0 }}>{JSON.stringify(s, null, 2)}</pre>
                   </Card>
                 ))}
                 <Steps size="small" items={(detail.definition?.steps ?? []).map((s: any) => ({ title: s.id }))} />
               </Space>
             ) },
-            { key: 'json', label: '定义 JSON', children: <pre style={{ maxHeight: 420, overflow: 'auto' }}>{JSON.stringify(detail.definition, null, 2)}</pre> },
+            { key: 'json', label: '定义 JSON', children: <pre className="dp-code-block">{JSON.stringify(detail.definition, null, 2)}</pre> },
             { key: 'runs', label: `运行历史（${runs.length}）`, children: (
               <Table rowKey="id" size="small" pagination={false} dataSource={runs}
-                expandable={{ expandedRowRender: (r) => <pre style={{ margin: 0, fontSize: 12 }}>{JSON.stringify(r.context, null, 2)}</pre> }}
+                expandable={{ expandedRowRender: (r) => <pre className="dp-code-block" style={{ margin: 0 }}>{JSON.stringify(r.context, null, 2)}</pre> }}
                 columns={[
                   { title: '运行 ID', dataIndex: 'id', render: (v: string) => v.slice(0, 8), width: 100 },
                   { title: '状态', dataIndex: 'status', render: (s: string) => <Tag color={s === 'Completed' ? 'green' : s === 'Running' ? 'blue' : 'red'}>{s}</Tag> },
@@ -1696,7 +1897,7 @@ function WorkflowsPage() {
         )}
       </Modal>
       <Modal open={!!runDetail} onCancel={() => setRunDetail(null)} footer={null} title={`运行详情 ${runDetail?.id?.slice(0, 8) ?? ''}`} width={720}>
-        {runDetail && <pre style={{ maxHeight: 420, overflow: 'auto' }}>{JSON.stringify(runDetail, null, 2)}</pre>}
+        {runDetail && <pre className="dp-code-block">{JSON.stringify(runDetail, null, 2)}</pre>}
       </Modal>
     </Space>
   );
@@ -1707,13 +1908,13 @@ function LegacyFrame({ pageKey, children }: { pageKey: string; children: React.R
   const meta = PAGES.find((p) => p.key === pageKey);
   return (
     <div>
-      <PageHeader title={meta?.label ?? ''} description={meta?.desc} />
+      <PageHeader eyebrow={meta?.group} title={meta?.label ?? ''} description={meta?.desc} />
       {children}
     </div>
   );
 }
 
-const PAGE_KEYS = ['1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16','17','18','19','20'];
+const PAGE_KEYS = ['1','2','3','6','7','8','9','10','12','13','14','15','16','17','18','19','20'];
 function readHashPage(): string {
   try {
     const k = window.location.hash.replace(/^#\/?/, '');
@@ -1745,7 +1946,6 @@ export default function App() {
       | { action: 'theme'; mode: ThemeMode }
       | { action: 'toggle-sider' }
       | { action: 'import-project' }
-      | { action: 'new-terminal' }
       | { action: 'run-project' };
     const bridge = (window as unknown as {
       devpilot?: { onMenu?: (cb: (p: unknown) => void) => () => void };
@@ -1758,38 +1958,37 @@ export default function App() {
         case 'theme': setMode(p.mode); break;
         case 'toggle-sider': window.dispatchEvent(new Event('devpilot:toggle-sider')); break;
         case 'import-project': navigate('2'); break;
-        case 'new-terminal': navigate('5'); break;
-        case 'run-project': navigate('4'); break;
+        case 'run-project': navigate('2'); break;
         default: break;
       }
     });
   }, [setMode]);
+
+  // 环境检测只在应用启动时做一次（页面上的「刷新检测」按钮可手动重扫）
+  useEffect(() => { primeEnvironments(); }, []);
 
   const finishOnboarding = () => setOnboarded(true);
   const rerunOnboarding = () => {
     try { localStorage.removeItem('devpilot.onboarded'); } catch { /* 忽略 */ }
     setOnboarded(false);
   };
-  const openProject = (id: string) => { setSelectedProjectId(id); navigate('2'); };
+  const openProject = (id: string) => { setSelectedProjectId(id); navigate('1'); };
   const render = () => {
     switch (page) {
-      case '1': return <Dashboard go={navigate} onOpenProject={openProject} />;
+      case '1': return <Dashboard selectedId={selectedProjectId} onSelect={setSelectedProjectId} />;
       case '2': return <Projects selectedId={selectedProjectId} onSelect={setSelectedProjectId} />;
       case '3': return <LegacyFrame pageKey='3'><Tasks /></LegacyFrame>;
-      case '4': return <Runtime go={navigate} />;
-      case '5': return <LegacyFrame pageKey='5'><Terminal /></LegacyFrame>;
       case '6': return <LegacyFrame pageKey='6'><Logs /></LegacyFrame>;
       case '7': return <LegacyFrame pageKey='7'><Approvals /></LegacyFrame>;
       case '8': return <LegacyFrame pageKey='8'><Environments /></LegacyFrame>;
-      case '9': return <LegacyFrame pageKey='9'><Settings rerunOnboarding={rerunOnboarding} /></LegacyFrame>;
+      case '9': return <LegacyFrame pageKey='9'><Settings rerunOnboarding={rerunOnboarding} themeMode={themeMode} onThemeChange={setMode} /></LegacyFrame>;
       case '10': return <LegacyFrame pageKey='10'><GitCenter /></LegacyFrame>;
-      case '11': return <LegacyFrame pageKey='11'><CodeWorkspace /></LegacyFrame>;
       case '12': return <LegacyFrame pageKey='12'><DatabasesCenter /></LegacyFrame>;
       case '13': return <LegacyFrame pageKey='13'><ExternalToolsPage /></LegacyFrame>;
       case '14': return <LegacyFrame pageKey='14'><ConfigCenterPage /></LegacyFrame>;
       case '15': return <LegacyFrame pageKey='15'><BackupCenterPage /></LegacyFrame>;
       case '16': return <LegacyFrame pageKey='16'><NotificationCenterPage /></LegacyFrame>;
-      case '17': return <LegacyFrame pageKey='17'><AgentsCenterPage /></LegacyFrame>;
+      case '17': return <AgentsCenterPage />;
       case '18': return <LegacyFrame pageKey='18'><MemoryPage /></LegacyFrame>;
       case '19': return <LegacyFrame pageKey='19'><PluginsCenterPage /></LegacyFrame>;
       case '20': return <LegacyFrame pageKey='20'><WorkflowsPage /></LegacyFrame>;

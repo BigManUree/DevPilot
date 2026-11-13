@@ -6,18 +6,16 @@ export type MenuAction =
   | { action: 'theme'; mode: 'system' | 'light' | 'dark' }
   | { action: 'toggle-sider' }
   | { action: 'import-project' }
-  | { action: 'new-terminal' }
   | { action: 'run-project' };
 
 const PAGES: Array<[string, string]> = [
-  ['1', '工作台'], ['2', '项目'], ['4', '运行中心'], ['5', '终端'], ['6', '日志与诊断'],
-  ['10', 'Git'], ['11', '代码工作区'], ['3', '任务'], ['7', '审批'], ['17', 'Agent'],
-  ['18', '记忆'], ['20', '工作流'], ['8', '环境与依赖'], ['12', '数据库与服务'],
+  ['1', '工作台'], ['2', '项目管理'], ['6', '日志与诊断'], ['10', 'Git'], ['3', '任务'], ['7', '审批'],
+  ['17', 'Agent'], ['18', '记忆'], ['20', '工作流'], ['8', '环境与依赖'], ['12', '数据库与服务'],
   ['13', '外部工具'], ['14', '配置中心'], ['15', '备份迁移'], ['16', '通知'], ['19', '插件'], ['9', '设置'],
 ];
 
 /** Windows 桌面标准菜单栏：动作统一经 IPC 交给渲染进程执行，主进程不直接操作业务 */
-export function buildAppMenu(getWin: () => BrowserWindow | null): Menu {
+export function buildAppMenu(getWin: () => BrowserWindow | null, themeMode: 'system' | 'light' | 'dark' = 'system'): Menu {
   const send = (payload: MenuAction) => {
     const win = getWin();
     if (win && !win.isDestroyed()) win.webContents.send('devpilot:menu', payload);
@@ -29,9 +27,7 @@ export function buildAppMenu(getWin: () => BrowserWindow | null): Menu {
       label: '文件(&F)',
       submenu: [
         { label: '导入项目…', accelerator: 'Ctrl+O', click: () => send({ action: 'import-project' }) },
-        { label: '打开运行中心', accelerator: 'Ctrl+Shift+R', click: nav('4') },
-        { type: 'separator' },
-        { label: '新建终端', accelerator: 'Ctrl+T', click: () => send({ action: 'new-terminal' }) },
+        { label: '打开工作台', accelerator: 'Ctrl+Shift+R', click: nav('1') },
         { type: 'separator' },
         { label: '关闭窗口', role: 'close' },
         { label: '退出 DevPilot', accelerator: 'Alt+F4', role: 'quit' },
@@ -65,9 +61,9 @@ export function buildAppMenu(getWin: () => BrowserWindow | null): Menu {
         {
           label: '外观',
           submenu: [
-            { label: '跟随系统', type: 'radio', click: () => send({ action: 'theme', mode: 'system' }) },
-            { label: '浅色', type: 'radio', click: () => send({ action: 'theme', mode: 'light' }) },
-            { label: '深色', type: 'radio', click: () => send({ action: 'theme', mode: 'dark' }) },
+            { label: '跟随系统', type: 'radio', checked: themeMode === 'system', click: () => send({ action: 'theme', mode: 'system' }) },
+            { label: '浅色', type: 'radio', checked: themeMode === 'light', click: () => send({ action: 'theme', mode: 'light' }) },
+            { label: '深色', type: 'radio', checked: themeMode === 'dark', click: () => send({ action: 'theme', mode: 'dark' }) },
           ],
         },
       ],
@@ -117,8 +113,11 @@ export function buildAppMenu(getWin: () => BrowserWindow | null): Menu {
   return Menu.buildFromTemplate(template);
 }
 
-export function installAppMenu(getWin: () => BrowserWindow | null): void {
-  Menu.setApplicationMenu(buildAppMenu(getWin));
+export function installAppMenu(
+  getWin: () => BrowserWindow | null,
+  themeMode: 'system' | 'light' | 'dark' = 'system',
+): void {
+  Menu.setApplicationMenu(buildAppMenu(getWin, themeMode));
 }
 
 /** dev 下未打包时用于窗口标题栏的图标路径（打包态由 exe 内嵌图标承担） */

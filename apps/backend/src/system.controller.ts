@@ -1,10 +1,43 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query } from '@nestjs/common';
 import { DatabaseService } from './database/database.module';
 import { NotificationService } from './notifications/notification.service';
 
 @Controller('api/v1/system')
 export class SystemController {
   constructor(private readonly ds: DatabaseService, private readonly notify: NotificationService) {}
+
+  /**
+   * 列出指定路径下的子目录（浏览器模式的「选择项目目录」兜底）。
+   * path 为空时：Windows 返回可用盘符列表，其他平台从 / 开始。
+   * 返回 { path, parent, dirs: [{name, path}], error? }；parent 为 null 表示已到根。
+   */
+  @Get('fs/dirs')
+  fsDirs(@Query('path') p?: string) {
+    const fs = require('node:fs') as typeof import('node:fs');
+    const path = require('node:path') as typeof import('node:path');
+    if (!p || !p.trim()) {
+      if (process.platform === 'win32') {
+        const drives = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
+          .map((d) => `${d}:\\`)
+          .filter((d) => { try { fs.accessSync(d); return true; } catch { return false; } });
+        return { path: '', parent: null, dirs: drives.map((d) => ({ name: d, path: d })) };
+      }
+      p = '/';
+    }
+    try {
+      const resolved = path.resolve(p);
+      if (!fs.statSync(resolved).isDirectory()) return { error: `不是目录：${resolved}` };
+      const dirs = fs.readdirSync(resolved, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && !/^\$/.test(e.name))
+        .map((e) => ({ name: e.name, path: path.join(resolved, e.name) }))
+        .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+      const root = path.parse(resolved).root;
+      const parent = path.dirname(resolved);
+      return { path: resolved, parent: parent === resolved || parent === root && resolved === root ? null : parent, dirs };
+    } catch (e) {
+      return { error: String(e).slice(0, 200) };
+    }
+  }
 
   @Get('data-status')
   dataStatus() {

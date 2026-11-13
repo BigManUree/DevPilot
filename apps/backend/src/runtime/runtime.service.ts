@@ -128,6 +128,96 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       .filter(Boolean) as string[];
   }
 
+  /**
+   * 探测服务的真实浏览器访问路径并落库。
+   * 来源优先级：
+   *   1) 服务日志里出现的 http://(127.0.0.1|localhost):<port>/<path>（如 wb2api 的 /panel）
+   *   2) 根路径 3xx 重定向链终点（如 / → /panel）
+   *   3) 都没有 → '/'（前端只显示裸地址）
+   * 返回最终 access_path（可能为 '/'）。
+   */
+  async detectAccessUrl(serviceId: string): Promise<{ accessPath: string; url: string }> {
+    const svc = this.ds.db.prepare('SELECT * FROM project_services WHERE id = ?').get(serviceId) as
+      | { id: string; name: string; port: number | null }
+      | undefined;
+    if (!svc) throw new Error('service not found');
+    if (!svc.port) throw new Error(`service ${svc.name} 未配置端口，无 HTTP 访问地址`);
+
+    const fromLog = this.accessPathFromLogs(svc.port, svc.name);
+    const fromRedirect = await this.finalPathAfterRedirects(svc.port, '/');
+    let accessPath = '/';
+    if (fromLog && fromLog !== '/') accessPath = fromLog;
+    else if (fromRedirect && fromRedirect !== '/') accessPath = fromRedirect;
+
+    this.ds.db
+      .prepare('UPDATE project_services SET access_path = ?, updated_at = ? WHERE id = ?')
+      .run(accessPath, new Date().toISOString(), serviceId);
+    return { accessPath, url: `http://127.0.0.1:${svc.port}${accessPath === '/' ? '' : accessPath}` };
+  }
+
+  /** 扫服务日志尾部，找 http://127.0.0.1:<port>/<path> 或 http://localhost:<port>/<path>，取最后一次出现的非根路径 */
+  private accessPathFromLogs(port: number, svcName: string): string | null {
+    try {
+      const tail = this.logs.tail(`service.${svcName}`, 300);
+      if (!tail) return null;
+      const re = new RegExp(`http://(?:127\\.0\\.0\\.1|localhost):${port}(/[^\\s"')\\]]*)`, 'gi');
+      let m: RegExpExecArray | null;
+      let found: string | null = null;
+      while ((m = re.exec(tail))) {
+        const p = m[1];
+        // 过滤明显不是页面入口的路径（API 前缀 / 探针）
+        if (/^\/(api|v1|v2|docs|openapi\.json|favicon|health|metrics)\b/i.test(p)) continue;
+        found = p;
+      }
+      return found;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 跟随 3xx 重定向（最多 5 跳），返回最终路径；连接失败/超时返回 null */
+  private finalPathAfterRedirects(port: number, startPath: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      let current = startPath;
+      let hops = 0;
+      const step = () => {
+        if (hops++ >= 5) return resolve(current);
+        const req = http.get(
+          { host: '127.0.0.1', port, path: current, timeout: 2500, headers: { 'User-Agent': 'DevPilot-probe' } },
+          (res) => {
+            res.resume();
+            const loc = res.headers.location;
+            if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && loc) {
+              try {
+                const u = new URL(loc, `http://127.0.0.1:${port}`);
+                current = u.pathname + (u.search || '');
+                step();
+              } catch {
+                resolve(current);
+              }
+            } else {
+              resolve(current);
+            }
+          },
+        );
+        req.once('error', () => resolve(null));
+        req.once('timeout', () => { req.destroy(); resolve(null); });
+      };
+      step();
+    });
+  }
+
+  /** 启动成功后异步探测访问路径（不阻塞启动主流程） */
+  private refreshAccessPathInBackground(serviceId: string, svcName: string, port: number | null): void {
+    if (!port) return;
+    // 等应用把欢迎日志写出来再探（部分应用启动后 1-2s 才打印面板地址）
+    setTimeout(() => {
+      void this.detectAccessUrl(serviceId).catch(() => {
+        this.logs.log({ level: 'debug', sourceModule: `service.${svcName}`, message: '访问路径探测失败（服务可能仍在启动中）' });
+      });
+    }, 2000);
+  }
+
   /** 启动单个服务 */
   async startService(serviceId: string, sessionId?: string): Promise<{ status: ServiceStatus; pid?: number; adopted?: boolean }> {
     const svc = this.ds.db.prepare('SELECT * FROM project_services WHERE id = ?').get(serviceId) as
@@ -151,6 +241,7 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
           if (pid) this.appendSessionPids(sid, pid);
           this.setStatus(serviceId, 'Running');
           this.broadcastServiceEvent(serviceId, svc.project_id);
+          this.refreshAccessPathInBackground(serviceId, svc.name, svc.port);
           this.logs.log({
             level: 'warn',
             sourceModule: `service.${svc.name}`,
@@ -227,11 +318,18 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       }
     });
 
-    // 健康检查（端口探活）：25s 覆盖 streamlit / vite 这类冷启动较慢的服务
-    const healthy = svc.port ? await this.waitPort(svc.port, 25000) : true;
+    // 健康检查：有端口走 TCP 探活（25s 覆盖 streamlit / vite 这类冷启动较慢的服务）；
+    // 无端口服务也要做最小存活检测——秒退（入口文件不存在等）曾被直接记为「启动成功」，
+    // 导致修复循环永远不触发。3s 后进程还活着才算成功。
+    const healthy = svc.port
+      ? await this.waitPort(svc.port, 60000)
+      : await new Promise<boolean>((resolve) => {
+          const t = setTimeout(() => resolve(child.exitCode === null && child.signalCode === null), 3000);
+          child.once('exit', () => { clearTimeout(t); resolve(false); });
+        });
     if (!healthy) {
       // 进程已经退出时不能标 Unhealthy：那是崩溃（Failed），否则会被上层误判成"还在跑但没监听"
-      if (child.exitCode !== null) {
+      if (child.exitCode !== null || child.signalCode !== null) {
         this.setStatus(serviceId, 'Failed');
         this.broadcastServiceEvent(serviceId, svc.project_id);
         this.logs.log({
@@ -244,13 +342,14 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       this.broadcastServiceEvent(serviceId, svc.project_id);
       this.logs.log({
         level: 'warn', sourceModule: `service.${svc.name}`, projectId: svc.project_id,
-        message: `进程在运行，但 ${svc.port} 端口 25s 内未监听（可能还没启动完，或监听在其它端口）`,
+        message: `进程在运行，但 ${svc.port} 端口 60s 内未监听（可能还没启动完，或监听在其它端口）`,
       });
       return { status: 'Unhealthy', pid: child.pid };
     }
 
     this.setStatus(serviceId, 'Running');
     this.broadcastServiceEvent(serviceId, svc.project_id);
+    this.refreshAccessPathInBackground(serviceId, svc.name, svc.port);
     this.audit.record({ subject: 'user:local-user', action: 'service.start', target: svc.name, result: 'ok', detail: { pid: child.pid, command: svc.start_command } });
     return { status: 'Running', pid: child.pid };
   }
@@ -359,7 +458,9 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     return new Promise((resolve) => {
       const req = http.get({ host: '127.0.0.1', port, path: urlPath, timeout: 2500, headers: { 'User-Agent': 'DevPilot-probe' } }, (res) => {
         res.resume();
-        resolve(true);
+        // 4xx/5xx 不算健康：Windows HTTP.sys（Microsoft-HTTPAPI/2.0）对任意 Host 都回 400，
+        // 曾经因此把系统占用的端口误判成「项目实例」接管，实际服务根本没起来。
+        resolve(typeof res.statusCode === 'number' && res.statusCode < 400);
       });
       req.on('timeout', () => { req.destroy(); resolve(false); });
       req.on('error', () => resolve(false));

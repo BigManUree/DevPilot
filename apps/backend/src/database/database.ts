@@ -494,7 +494,16 @@ CREATE TABLE workflow_runs (
   },
 };
 
-export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5, V6, V7, V8];
+/** V9：服务真实访问路径（启动后探测，如 wb2api 的 /panel） */
+const V9: Migration = {
+  version: 9,
+  name: 'service-access-path',
+  up: (db) => {
+    db.exec(`ALTER TABLE project_services ADD COLUMN access_path TEXT;`);
+  },
+};
+
+export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5, V6, V7, V8, V9];
 
 export function openDatabase(dataDir: string): Database.Database {
   fs.mkdirSync(dataDir, { recursive: true });

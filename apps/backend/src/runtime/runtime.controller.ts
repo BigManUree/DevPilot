@@ -47,6 +47,12 @@ export class RuntimeController {
     return this.svc.stopService(serviceId, body?.force === true);
   }
 
+  /** 重新探测服务真实访问路径（日志 URL / 重定向跟随），前端在服务运行中且无路径时调用 */
+  @Post('services/:serviceId/detect-url')
+  detectUrl(@Param('serviceId') serviceId: string) {
+    return this.svc.detectAccessUrl(serviceId);
+  }
+
   @Post('projects/:projectId/start')
   startProject(@Param('projectId') projectId: string) {
     return this.svc.startProject(projectId);

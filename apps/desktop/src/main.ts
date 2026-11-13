@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain } from 'electron';
+import { app, BrowserWindow, shell, ipcMain, dialog } from 'electron';
 import path from 'node:path';
 import { BackendManager } from './backend-manager';
 import { installAppMenu } from './app-menu';
@@ -41,8 +41,22 @@ function createWindow(backendUrl: string) {
 
 app.whenReady().then(async () => {
   ipcMain.handle('devpilot:getBackendUrl', () => backend.url);
+  // 系统目录选择器：返回所选目录绝对路径，取消返回 null
+  ipcMain.handle('devpilot:pickDirectory', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender) ?? undefined;
+    const r = await dialog.showOpenDialog(win as BrowserWindow, {
+      title: '选择目录',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    return r.canceled || !r.filePaths.length ? null : r.filePaths[0];
+  });
   // 原生菜单栏：动作经 IPC 交给渲染进程（业务逻辑仍在前端）
   installAppMenu(() => BrowserWindow.getAllWindows()[0] ?? null);
+  // 渲染层主题偏好变化时，同步原生菜单外观 radio 选中态
+  ipcMain.handle('devpilot:menuTheme', (_event, mode: unknown) => {
+    const next = mode === 'light' || mode === 'dark' ? mode : 'system';
+    installAppMenu(() => BrowserWindow.getAllWindows()[0] ?? null, next);
+  });
   try {
     const backendUrl = await backend.ensure();
     createWindow(backendUrl);

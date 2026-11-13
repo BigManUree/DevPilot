@@ -167,7 +167,7 @@ export class ProjectService {
     return { project, services, configs };
   }
 
-  /** 重新分析：重新跑规则引擎，config_version+1 */
+  /** 重新分析：重新跑规则引擎，config_version+1；新识别到的服务自动补录入表（同名跳过） */
   reanalyze(projectId: string): AnalysisResult {
     const row = this.ds.db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as { root_path: string } | undefined;
     if (!row) throw new Error('project not found');
@@ -176,6 +176,29 @@ export class ProjectService {
       .prepare('UPDATE projects SET analysis_status=?, updated_at=? WHERE id=?')
       .run('drafted', new Date().toISOString(), projectId);
     this.saveConfigSnapshot(projectId, analysis);
+
+    // 补录：识别规则升级后（如新增了 Python 子目录入口识别），已导入的项目重新分析即可补上漏掉的服务
+    const existing = new Set(
+      (this.ds.db.prepare('SELECT name FROM project_services WHERE project_id = ?').all(projectId) as Array<{ name: string }>).map((r) => r.name),
+    );
+    const now = new Date().toISOString();
+    const insSvc = this.ds.db.prepare(
+      `INSERT INTO project_services (id, project_id, name, service_type, workdir, start_command, build_command, port, depends_on_json, shared, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Stopped', ?, ?)`,
+    );
+    const added: string[] = [];
+    for (const s of analysis.services) {
+      if (existing.has(s.name)) continue;
+      insSvc.run(
+        randomUUID(), projectId, s.name, s.service_type, s.workdir,
+        s.start_command ?? null, s.build_command ?? null, s.port ?? null,
+        s.depends_on ? JSON.stringify(s.depends_on) : null, s.shared ? 1 : 0, now, now,
+      );
+      added.push(s.name);
+    }
+    if (added.length) {
+      this.audit.record({ subject: 'user:local-user', action: 'project.reanalyze', target: projectId, result: 'ok', detail: { added } });
+    }
     return analysis;
   }
 

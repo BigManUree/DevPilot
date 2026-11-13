@@ -45,6 +45,16 @@ export class GitController {
     return this.svc.switchBranch(body.repoPath, body.branch);
   }
 
+  @Post('discard')
+  discard(@Body() body: { repoPath: string; files: string[] }) {
+    return this.svc.discard(body.repoPath, body.files);
+  }
+
+  @Post('revert')
+  revert(@Body() body: { repoPath: string; hash: string }) {
+    return this.svc.revertCommit(body.repoPath, body.hash);
+  }
+
   @Post('push')
   push(@Body() body: { repoPath: string; allowPush?: boolean; subjectType?: string; subjectId?: string }) {
     return this.svc.push(body.repoPath, body.allowPush === true, body.subjectType ?? 'user', body.subjectId ?? 'local-user');

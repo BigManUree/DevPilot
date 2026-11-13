@@ -10,6 +10,14 @@ async function baseUrl(): Promise<string> {
   return 'http://127.0.0.1:37100';
 }
 
+/** 打开目录选择器：Electron 用系统对话框；浏览器经后端目录浏览兜底（dirPicker.tsx）。取消返回 null */
+export async function pickDirectory(): Promise<string | null> {
+  const dp = (window as unknown as { devpilot?: { pickDirectory?: () => Promise<string | null> } }).devpilot;
+  if (dp?.pickDirectory) return dp.pickDirectory();
+  const m = await import('./dirPicker');
+  return m.pickDirectoryInBrowser();
+}
+
 function pickMessage(data: unknown, status: number, statusText: string): string {
   if (data && typeof data === 'object') {
     const d = data as { message?: unknown; error?: unknown };

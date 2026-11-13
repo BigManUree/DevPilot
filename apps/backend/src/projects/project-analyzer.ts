@@ -140,26 +140,60 @@ export class ProjectAnalyzer {
     // Python
     if (has('requirements.txt', 'pyproject.toml', 'setup.py')) {
       facts.language = 'python';
+      const pyDeps = this.pythonDependencies(root);
+      // uv 管理的项目（uv.lock 存在）统一走 uv run，避免系统解释器缺依赖
+      const prefix = has('uv.lock') ? 'uv run ' : '';
+
       if (has('manage.py')) {
         facts.framework = 'django';
         services.push({
           name: 'django',
           service_type: 'backend',
           workdir: root,
-          start_command: 'python manage.py runserver',
+          start_command: `${prefix}python manage.py runserver`,
           port: 8000,
         });
-      } else if (has('app.py', 'main.py')) {
+      }
+
+      // FastAPI / uvicorn：入口支持根目录与 app/backend/src/server/api 一级子目录
+      // （前后端分层仓库的 Python 入口常在 app/main.py，根目录什么都没有）
+      const backendEntry = this.findUvicornEntry(root);
+      if (backendEntry && (pyDeps.has('fastapi') || pyDeps.has('uvicorn'))) {
+        facts.framework = 'fastapi';
+        services.push({
+          name: 'fastapi-backend',
+          service_type: 'backend',
+          workdir: root,
+          start_command: `${prefix}uvicorn ${backendEntry} --host 127.0.0.1 --port 8000`,
+          port: 8000,
+        });
+      } else if (!services.length && has('app.py', 'main.py', 'webui.py', 'server.py')) {
         facts.framework = 'flask/fastapi(候选)';
+        // 入口按实际存在的文件挑，不硬编码 app.py（很多仓库入口是 main.py / webui.py）
+        const entry = ['app.py', 'webui.py', 'main.py', 'server.py'].find((f) => fs.existsSync(path.join(root, f)))!;
         services.push({
           name: 'python-app',
           service_type: 'backend',
           workdir: root,
-          start_command: 'python app.py',
+          start_command: `${prefix}python ${entry}`,
         });
-        unknowns.push('Python 入口文件按 app.py 猜测，需确认');
-      } else {
+        unknowns.push(`Python 入口按 ${entry} 猜测，需确认`);
+      } else if (!backendEntry && !services.length) {
         unknowns.push('Python 项目：未找到入口文件');
+      }
+
+      // Streamlit 前端：依赖里有 streamlit 且存在导入它的入口脚本
+      if (pyDeps.has('streamlit')) {
+        const stEntry = this.findStreamlitEntry(root);
+        if (stEntry) {
+          services.push({
+            name: 'streamlit-ui',
+            service_type: 'frontend',
+            workdir: root,
+            start_command: `${prefix}streamlit run ${stEntry}`,
+            port: 8501,
+          });
+        }
       }
     }
 
@@ -269,6 +303,82 @@ export class ProjectAnalyzer {
             };
           }
         }
+      }
+    }
+    return null;
+  }
+
+  /** 读取 pyproject.toml / requirements.txt 里的依赖名集合（小写归一） */
+  private static pythonDependencies(root: string): Set<string> {
+    const deps = new Set<string>();
+    const add = (n: string) => {
+      const norm = n.toLowerCase().replace(/_/g, '-');
+      if (norm) deps.add(norm);
+    };
+    const req = path.join(root, 'requirements.txt');
+    if (fs.existsSync(req)) {
+      for (const l of fs.readFileSync(req, 'utf-8').split(/\r?\n/)) {
+        const m = /^\s*([A-Za-z0-9_.\-]+)/.exec(l);
+        if (m) add(m[1]);
+      }
+    }
+    const pyproject = path.join(root, 'pyproject.toml');
+    if (fs.existsSync(pyproject)) {
+      // 逐行扫描 dependencies 数组（不能用 [^\]]* 正则：包名里的 extras 如 uvicorn[standard] 含 ]）
+      const lines = fs.readFileSync(pyproject, 'utf-8').split(/\r?\n/);
+      let inDeps = false;
+      for (const l of lines) {
+        if (!inDeps) {
+          if (/^\s*dependencies\s*=\s*\[/i.test(l)) inDeps = true;
+          continue;
+        }
+        if (/^\s*\]\s*$/.test(l)) break; // 数组结束
+        const d = /["']([A-Za-z0-9_.\-]+)/.exec(l);
+        if (d) add(d[1]);
+      }
+    }
+    return deps;
+  }
+
+  /**
+   * 找 uvicorn 入口：根目录与 app/backend/src/server/api 一级子目录下的 main.py / app.py。
+   * 返回 uvicorn 模块路径（如 app.main:app），找不到返回 null。
+   */
+  private static findUvicornEntry(root: string): string | null {
+    const subdirs = ['', 'app', 'backend', 'src', 'server', 'api'];
+    for (const d of subdirs) {
+      const dir = d ? path.join(root, d) : root;
+      if (!fs.existsSync(dir)) continue;
+      for (const f of ['main.py', 'app.py']) {
+        if (!fs.existsSync(path.join(dir, f))) continue;
+        const moduleName = d ? `${d}.${f.replace(/\.py$/, '')}` : f.replace(/\.py$/, '');
+        return `${moduleName}:app`;
+      }
+    }
+    return null;
+  }
+
+  /** 找 Streamlit 入口：root / ui / pages / app / webui / streamlit 下第一个 import streamlit 的 .py */
+  private static findStreamlitEntry(root: string): string | null {
+    const subdirs = ['', 'ui', 'pages', 'app', 'webui', 'streamlit'];
+    for (const d of subdirs) {
+      const dir = d ? path.join(root, d) : root;
+      if (!fs.existsSync(dir)) continue;
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        if (!e.isFile() || !e.name.endsWith('.py')) continue;
+        if (/^(test_|_)/.test(e.name)) continue;
+        try {
+          const head = fs.readFileSync(path.join(dir, e.name), 'utf-8').slice(0, 4000);
+          if (/^\s*(import\s+streamlit|from\s+streamlit)/m.test(head)) {
+            return d ? `${d}/${e.name}` : e.name;
+          }
+        } catch { /* 读不到就跳过 */ }
       }
     }
     return null;
