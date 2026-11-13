@@ -2,11 +2,11 @@
 
 本地优先的 AI 项目管理与开发执行工作台（Windows 桌面形态，Electron + NestJS + SQLite）。设计基线见 `docs/`。
 
-## 当前状态（2026-11-11）
+## 当前状态（2026-11-13 智能化升级）
 
-- **验收 14/14 PASSED**（`node tests/acceptance.mjs`，可重复运行）
-- **单元测试 62/62**（7 suites，`cd apps/backend && pnpm test`）
-- 数据库 schema v8（31 表，版本化迁移 + 迁移前自动备份）
+- **验收 22/22 PASSED**（`node tests/acceptance.mjs --help` 支持 --dry-run/--repo/--no-report）
+- **单元测试 87/87**（10 suites，`cd apps/backend && pnpm test`）
+- 数据库 schema v17（37 表，版本化迁移 + 迁移前自动备份）
 - 后端端口 37100（REST `/api/v1/*` + WebSocket `/ws` 事件推送）
 
 ## 功能版图（20 页工作台）
@@ -14,7 +14,7 @@
 | 页面 | 内容 |
 |---|---|
 | 首页工作台 | Supervisor 输入、任务/审批概览 |
-| 项目管理 | 六种导入（文件夹/git clone/压缩包等）、AI 结构识别、删除双确认 |
+| 项目管理 | 统一导入六来源（文件夹/git clone/压缩包 ZIP·7Z·RAR/HTTP 下载/Docker Compose）、组件树档案、环境体检、运行档案 |
 | 任务中心 | 创建/执行/暂停/恢复/取消/追问（WaitingInput）闭环 |
 | 运行中心 | 服务启停、端口探活、共享服务引用保护 + force、崩溃自动重启（on-failure ≤3 次） |
 | 终端中心 | xterm.js 多会话 |
