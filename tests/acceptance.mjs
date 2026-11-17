@@ -123,10 +123,16 @@ async function main() {
   const denied = await fetch(`${API}/tools/call`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subjectType: 'agent', subjectId: agentSub, tool: 'command.exec', params: { command: 'echo blocked' }, projectId: pid }) }).then(j);
   record('S5', '未授权命令阻止并生成审批', denied.permission === 'pending_approval' && !!denied.approvalId, denied.error);
 
-  // S5b 审批通过 → agent 命令放行
+  // S5b 参数级审批：批准的是「echo blocked」这一次调用 → 完全相同的调用放行（one-shot），
+  // 不同的命令（echo ok）仍需重新审批——审批范围绑定具体参数，不再类别级放行（第三轮升级契约）
   const appr = await fetch(`${API}/approvals/${denied.approvalId}/approve`, { method: 'POST' }).then(j);
-  const allowed = await fetch(`${API}/tools/call`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subjectType: 'agent', subjectId: agentSub, tool: 'command.exec', params: { command: 'echo ok' }, projectId: pid }) }).then(j);
-  record('S5b', '审批授权后命令放行', !!appr.permissionId && allowed.ok === true, `exit=${allowed.data?.exitCode}`);
+  const allowed = await fetch(`${API}/tools/call`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subjectType: 'agent', subjectId: agentSub, tool: 'command.exec', params: { command: 'echo blocked' }, projectId: pid }) }).then(j);
+  record('S5b', '审批授权后同参数命令放行（one-shot 消费）', !!appr.permissionId && allowed.ok === true && appr.scope === 'param', `exit=${allowed.data?.exitCode}`);
+  const changed = await fetch(`${API}/tools/call`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subjectType: 'agent', subjectId: agentSub, tool: 'command.exec', params: { command: 'echo ok' }, projectId: pid }) }).then(j);
+  record('S5b2', '参数改动后必须重新审批（不得沿用旧授权）', changed.permission === 'pending_approval', changed.error ?? '');
+  // one-shot 已消费：同参数第二次调用也要重新审批
+  const reused = await fetch(`${API}/tools/call`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subjectType: 'agent', subjectId: agentSub, tool: 'command.exec', params: { command: 'echo blocked' }, projectId: pid }) }).then(j);
+  record('S5b3', 'one-shot 授权用后即失效（防重放）', reused.permission === 'pending_approval', reused.error ?? '');
 
   // S5c 工具注册中心
   const tools = await fetch(`${API}/tools`).then(j);
