@@ -14,6 +14,8 @@
     "dev:renderer": "pnpm --filter @devpilot/renderer run dev",
     "lint": "pnpm -r run lint",
     "test": "pnpm -r run test",
-    "typecheck": "pnpm -r run typecheck"
+    "typecheck": "pnpm -r run typecheck",
+    "bench:startup": "node scripts/startup-bench.mjs",
+    "bench:startup:dev": "node scripts/startup-bench.mjs --dir apps/desktop"
   }
 }

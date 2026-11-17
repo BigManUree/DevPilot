@@ -72,12 +72,18 @@ class Win32Adapter implements PlatformAdapter {
     return 'where';
   }
 
+  /**
+   * 进程存活探测：libuv 的 uv_kill(pid, 0) → OpenProcess + CloseHandle，单次 ~0.05ms 且不阻塞事件循环。
+   * 旧实现每次 execSync('tasklist') 实测 ~150ms 同步阻塞（停服务轮询里每 80~100ms 调一次，
+   * 会把整个 Nest 事件循环卡死，导致停止请求与随后刷新请求排队 —— 「点停止反应慢」的主因之一）。
+   */
   pidAlive(pid: number): boolean {
     try {
-      const out = execSync(`tasklist /FI "PID eq ${pid}" /NH`, { windowsHide: true }).toString();
-      return out.includes(String(pid));
-    } catch {
-      return false;
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      // EPERM：进程存在但当前用户无权 signal；ESRCH / 其他：进程已不存在
+      return (e as NodeJS.ErrnoException)?.code === 'EPERM';
     }
   }
 
@@ -158,6 +164,35 @@ export function createPlatformAdapter(platform: NodeJS.Platform = process.platfo
 }
 
 /** 后端单例：进程平台固定，导出共享实例避免重复构造 */
+/**
+ * 为被托管的子进程清理「宿主注入」的环境变量。
+ *
+ * 真实故障（AIHOT-main 前端起不来）：DevPilot 后端本身是被编辑器/Agent 宿主拉起的，
+ * 宿主的 NODE_OPTIONS 里挂了 safe-delete shim；spawn 项目服务时 `{...process.env}` 原样继承，
+ * 于是 react-router 的 typegen 删 `.react-router/types`（83 项）时被 shim 拦下抛错，
+ * 开发服务器直接 exit 1 —— 用户看到的是「项目启动失败」，实际是宿主注入污染。
+ *
+ * 规则：默认剔除宿主注入（NODE_OPTIONS / ELECTRON_RUN_AS_NODE 等），除非调用方在服务 env 里
+ * 显式给出，或设 DEVIPILOT_KEEP_NODE_OPTIONS=1 保留。
+ */
+export function cleanServiceEnv(
+  base: NodeJS.ProcessEnv,
+  extra?: Record<string, string> | null,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base, ...(extra ?? {}) };
+  const keepNodeOptions = process.env.DEVIPILOT_KEEP_NODE_OPTIONS === '1';
+  const injected = Object.keys(env).filter((k) => {
+    if (extra && Object.prototype.hasOwnProperty.call(extra, k)) return false; // 服务显式配置的保留
+    if (k === 'ELECTRON_RUN_AS_NODE') return true;
+    if (k === 'NODE_OPTIONS') return !keepNodeOptions;
+    // 宿主的 shim/诊断注入（如 NODE_REPL_EXTERNAL_MODULE / 各类 *_SHIM）
+    if (k.endsWith('_SHIM') || k === 'NODE_REPL_EXTERNAL_MODULE') return true;
+    return false;
+  });
+  for (const k of injected) delete env[k];
+  return env;
+}
+
 export const platform = createPlatformAdapter();
 
 export { credentials, createCredentialStore } from './credential-store';

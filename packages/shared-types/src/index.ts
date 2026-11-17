@@ -272,7 +272,9 @@ export interface PlanVersion {
 
 /** Agent 任务预算 */
 export const AGENT_BUDGET_DEFAULT = {
-  maxToolCalls: 40,
+  // 80：写脚本/改代码类任务的探索（读结构、看依赖、查环境）本身就占 30-50 次，
+  // 40 曾把「探索完刚写出产物」的任务掐死在临门一脚（fs.write 后即达上限判 Failed）
+  maxToolCalls: 80,
   maxPlanIterations: 5,
   maxSubtaskRetries: 2,
   maxDurationMs: 20 * 60_000,

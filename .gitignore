@@ -41,3 +41,10 @@ apps/renderer/shots/
 
 # 代码签名证书（本地私钥，禁止入库）
 apps/desktop/certs/
+
+# 清理回收站（本地删除暂存，确认后手动清空）
+.trash-*/
+apps/desktop/pack-out/
+
+# 启动性能优化过程中的打包产物
+apps/desktop/pack-opt*/
