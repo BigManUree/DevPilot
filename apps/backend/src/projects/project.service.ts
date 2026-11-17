@@ -172,8 +172,16 @@ export class ProjectService {
   }
 
   get(projectId: string) {
-    const project = this.ds.db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId);
-    if (!project) throw new Error('project not found');
+    // 与 list() 同源计算 service_count/running_count/cli_service_id：
+    // 详情抽屉的启动/停止按钮依赖 running_count，缺了会导致「服务运行中但停止按钮禁用」
+    const project = this.ds.db.prepare(`
+      SELECT p.*,
+        (SELECT COUNT(*) FROM project_services s WHERE s.project_id = p.id) AS service_count,
+        (SELECT COUNT(*) FROM project_services s WHERE s.project_id = p.id AND s.status = 'Running') AS running_count,
+        (SELECT s.id FROM project_services s WHERE s.project_id = p.id AND s.service_type = 'cli' LIMIT 1) AS cli_service_id
+      FROM projects p WHERE p.id = ?
+    `).get(projectId);
+    if (!project) throw new NotFoundException(`项目不存在：${projectId}`);
     const services = this.ds.db
       .prepare('SELECT * FROM project_services WHERE project_id = ?')
       .all(projectId);
@@ -353,9 +361,17 @@ export class ProjectService {
   }
 
   /** 删除：默认仅删 DevPilot 记录；deleteFiles 需显式传入（UI 另有确认弹窗） */
-  remove(projectId: string, deleteFiles = false) {
-    const row = this.ds.db.prepare('SELECT root_path FROM projects WHERE id = ?').get(projectId) as { root_path: string } | undefined;
-    if (!row) throw new Error('project not found');
+  remove(projectId: string, deleteFiles = false, confirm?: string) {
+    const row = this.ds.db.prepare('SELECT root_path, name FROM projects WHERE id = ?').get(projectId) as
+      | { root_path: string; name: string }
+      | undefined;
+    if (!row) throw new NotFoundException(`项目不存在：${projectId}`);
+    // 审计 S-04：删磁盘文件是破坏性操作，必须带显式确认（?confirm=<项目名> 或 ?confirm=1）
+    if (deleteFiles && confirm !== '1' && confirm !== row.name) {
+      throw new ConflictException(
+        `删除项目磁盘文件是破坏性操作，需要显式确认：追加 ?confirm=1 或 ?confirm=${encodeURIComponent(row.name)}`,
+      );
+    }
     this.ds.db.prepare('DELETE FROM projects WHERE id = ?').run(projectId);
     this.audit.record({
       subject: 'user:local-user',
@@ -366,6 +382,20 @@ export class ProjectService {
     });
     if (deleteFiles) fs.rmSync(row.root_path, { recursive: true, force: true });
     return { projectId, deletedRecord: true, deletedFiles: deleteFiles };
+  }
+
+  /** 删除单个服务配置（识别错的服务——如把数据库识别成静态服务器——需要能删掉重来） */
+  deleteService(projectId: string, serviceId: string): { ok: true; serviceId: string } {
+    const svc = this.ds.db
+      .prepare('SELECT id, name, status FROM project_services WHERE id = ? AND project_id = ?')
+      .get(serviceId, projectId) as { id: string; name: string; status: string } | undefined;
+    if (!svc) throw new NotFoundException(`服务不存在：${serviceId}`);
+    if (['Running', 'Starting', 'Stopping'].includes(svc.status)) {
+      throw new ConflictException(`服务「${svc.name}」正在运行（${svc.status}），请先停止再删除`);
+    }
+    this.ds.db.prepare('DELETE FROM project_services WHERE id = ?').run(serviceId);
+    this.audit.record({ subject: 'user:local-user', action: 'service.delete', target: svc.name, result: 'ok', detail: { projectId, serviceId } });
+    return { ok: true, serviceId };
   }
 
   /** scan：列出候选项目目录（含 package.json/pom.xml/.git 等标记的一级子目录） */
@@ -413,5 +443,65 @@ export class ProjectService {
     // 解压实现收敛到 platform-adapters（win32 Expand-Archive / posix unzip）
     plat.extractArchive(archivePath, dest);
     return dest;
+  }
+
+  // ============ 项目自定义图标 ============
+
+  private static readonly ICON_MIME: Record<string, string> = {
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp', '.gif': 'image/gif', '.ico': 'image/x-icon', '.svg': 'image/svg+xml',
+  };
+
+  private iconsDir(): string {
+    const dataDir = process.env.DEVIPILOT_DATA_DIR ?? path.join(process.env.APPDATA ?? process.cwd(), 'devpilot', 'data');
+    return path.join(dataDir, 'icons');
+  }
+
+  /** 设置项目图标：base64 图片写入 dataDir/icons/<projectId>.<ext>，旧图标清理；≥2MB 拒绝 */
+  setIcon(projectId: string, dataBase64: string, fileName: string): { ok: true; iconPath: string } {
+    const exists = this.ds.db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId);
+    if (!exists) throw new NotFoundException(`项目不存在：${projectId}`);
+    if (typeof dataBase64 !== 'string' || !dataBase64) throw new ConflictException('图片内容为空');
+    // 允许纯 base64 或 dataURL 形式
+    const m = /^data:([^;]+);base64,(.*)$/s.exec(dataBase64);
+    const b64 = (m ? m[2] : dataBase64).replace(/\s/g, '');
+    const size = Buffer.byteLength(b64, 'base64');
+    if (size > 2 * 1024 * 1024) throw new ConflictException(`图片过大（${Math.round(size / 1024)}KB），上限 2MB`);
+    const ext = path.extname(fileName ?? '').toLowerCase();
+    const mime = ProjectService.ICON_MIME[ext];
+    if (!mime) throw new ConflictException('不支持的图片格式（仅 png/jpg/webp/gif/ico/svg）');
+
+    const dir = this.iconsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    // 清理旧图标（扩展名可能变化）
+    for (const oldExt of Object.keys(ProjectService.ICON_MIME)) {
+      const old = path.join(dir, `${projectId}${oldExt}`);
+      if (old !== path.join(dir, `${projectId}${ext}`)) fs.rmSync(old, { force: true });
+    }
+    const iconPath = path.join(dir, `${projectId}${ext}`);
+    fs.writeFileSync(iconPath, Buffer.from(b64, 'base64'));
+    this.ds.db.prepare('UPDATE projects SET icon_path = ? WHERE id = ?').run(iconPath, projectId);
+    this.audit.record({ subject: 'user:local-user', action: 'project.icon.set', target: projectId, result: 'ok', detail: { ext, size } });
+    return { ok: true, iconPath };
+  }
+
+  /** 恢复默认字母头像：删除图标文件并清空字段 */
+  clearIcon(projectId: string): { ok: true } {
+    const row = this.ds.db.prepare('SELECT icon_path FROM projects WHERE id = ?').get(projectId) as { icon_path: string | null } | undefined;
+    if (!row) throw new NotFoundException(`项目不存在：${projectId}`);
+    if (row.icon_path && fs.existsSync(row.icon_path)) fs.rmSync(row.icon_path, { force: true });
+    this.ds.db.prepare('UPDATE projects SET icon_path = NULL WHERE id = ?').run(projectId);
+    return { ok: true };
+  }
+
+  /** 读取图标 → data URL（前端 <img> 直接可用）；无图标返回 null */
+  iconDataUrl(projectId: string): { dataUrl: string | null } {
+    const row = this.ds.db.prepare('SELECT icon_path FROM projects WHERE id = ?').get(projectId) as { icon_path: string | null } | undefined;
+    if (!row?.icon_path || !fs.existsSync(row.icon_path)) return { dataUrl: null };
+    const ext = path.extname(row.icon_path).toLowerCase();
+    const mime = ProjectService.ICON_MIME[ext] ?? 'image/png';
+    const buf = fs.readFileSync(row.icon_path);
+    if (buf.byteLength > 2 * 1024 * 1024) return { dataUrl: null };
+    return { dataUrl: `data:${mime};base64,${buf.toString('base64')}` };
   }
 }

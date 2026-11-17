@@ -33,7 +33,7 @@ const SCRIPT_NAME_PATTERNS: RegExp[] = [
 ];
 
 const SKIP_LINE =
-  /^(echo|@echo|rem\b|::|setlocal|endlocal|chcp|title|cls|pause|timeout|goto|exit\b|if\b|for\b|call\s+:|:\w|\r?$)/i;
+  /^(echo|@echo|rem\b|::|setlocal|endlocal|chcp|title|cls|pause|timeout|goto|exit\b|if\b|for\b|call\s+:|:\w|taskkill\b|curl\b|cd\b|\r?$)/i;
 
 /** 命令签名：命中即视为「启动应用的命令」，port 为该类型的常见默认端口 */
 const SIGNATURES: Array<{ re: RegExp; kind: string; port?: number }> = [
@@ -55,6 +55,8 @@ const SIGNATURES: Array<{ re: RegExp; kind: string; port?: number }> = [
   { re: /\bphp\s+-S\b/i, kind: 'php', port: 8000 },
   { re: /\b(rails\s+(s|server)|ruby\s+.*\.rb)\b/i, kind: 'ruby', port: 3000 },
   { re: /\bcargo\s+run\b/i, kind: 'rust', port: null as unknown as number },
+  // 兜底：直接启动 exe（含 exe 启动器包 PowerShell / start "" 的形态，见下方专用提取）
+  { re: /[\w.\-~\\/:]+\.exe\b/i, kind: 'exe', port: null as unknown as number },
 ];
 
 function isScriptName(name: string): boolean {
@@ -70,10 +72,10 @@ function existsUnder(root: string, p: string): boolean {
   }
 }
 
-/** 展开 %VAR%（cmd）与 $VAR / ${VAR}（sh/ps1） */
+/** 展开 %VAR%（cmd）与 $VAR / ${VAR}（sh/ps1）；%~dp0 类强制变量先行（防两个 %~dp0 之间被贪婪配对吞掉） */
 function expand(line: string, vars: Map<string, string>, preferred: Map<string, string>): string {
   const pick = (name: string) => preferred.get(name.toUpperCase()) ?? vars.get(name.toUpperCase()) ?? '';
-  let out = line;
+  let out = line.replace(/%~dp0/gi, pick('~DP0'));
   for (let i = 0; i < 5; i++) {
     const next = out
       .replace(/%([^%]+)%/g, (_m, k: string) => pick(k))
@@ -112,6 +114,10 @@ export function parseScript(root: string, scriptPath: string): LaunchScriptHit |
   // 1) 变量表：记录最后一次赋值，同时记录"路径真实存在"的取值优先使用
   const vars = new Map<string, string>();
   const preferred = new Map<string, string>();
+  // %~dp0（bat 所在目录）与项目根等价：种子进变量表供 expand 使用
+  const rootNorm = root.replace(/[\\/]+$/, '') + '\\';
+  vars.set('~DP0', rootNorm);
+  vars.set('DP0', rootNorm);
   for (const raw of lines) {
     const line = raw.trim().replace(/^@/, '');
     const m =
@@ -127,17 +133,37 @@ export function parseScript(root: string, scriptPath: string): LaunchScriptHit |
   }
 
   // 2) 逐行找启动命令
-  const hits: Array<{ command: string; kind: string; defPort: number | null; index: number }> = [];
+  const hits: Array<{ command: string; kind: string; defPort: number | null; index: number; exeExists?: boolean }> = [];
   lines.forEach((raw, index) => {
     let line = raw.trim().replace(/^@/, '');
     if (!line || SKIP_LINE.test(line)) return;
-    if (/^(start|explorer)\s/i.test(line)) return; // 打开浏览器的辅助行
+    // 只跳过「打开浏览器/网页」的辅助行；start "" "x.exe" 是真实启动，保留
+    if (/^(start|explorer)\s/i.test(line) && /https?:\/\//i.test(line)) return;
     line = line.replace(/^(call|exec|&\s*)/i, '').trim();
+    // start "" "xxx.exe" [args] → 去掉 start 前缀，交给通用 exe 签名
+    line = line.replace(/^start\s+(""|'')?\s*/i, '').trim();
     const cmd = expand(line, vars, preferred);
     if (!cmd || cmd.length < 3) return;
+
+    // PowerShell Start-Process 包一层启动 exe（典型：wb2api 的启动脚本）：
+    // 还原成「exe 路径 + 参数」直接执行；WorkingDirectory 由运行时以项目根承担
+    const fp = /Start-Process\s+-FilePath\s+'([^']+)'/.exec(cmd);
+    if (fp) {
+      const exeRaw = expand(fp[1].trim(), vars, preferred).replace(/^["']|["']$/g, '');
+      const al = /-ArgumentList\s+([^\n]*?)(?=\s+-[A-Z]\w*\b|\s+-WindowStyle|$)/i.exec(cmd);
+      const args = (al?.[1] ?? '')
+        .split(/[\s,]+/)
+        .map((s) => s.replace(/^['"]|['"]$/g, '').replace(/^%~dp0/i, rootNorm))
+        .filter(Boolean)
+        .join(' ');
+      const exeAbs = path.isAbsolute(exeRaw) ? exeRaw : path.join(root, exeRaw.replace(/^%~dp0/i, rootNorm));
+      hits.push({ command: [exeAbs, args].filter(Boolean).join(' '), kind: 'exe', defPort: null, index, exeExists: fs.existsSync(exeAbs) });
+      return;
+    }
+
     for (const sig of SIGNATURES) {
       if (sig.re.test(cmd)) {
-        hits.push({ command: cmd, kind: sig.kind, defPort: sig.port ?? null, index });
+        hits.push({ command: cmd, kind: sig.kind, defPort: sig.port ?? null, index, exeExists: /:[\\/]/.test(cmd) && /\.exe\b/i.test(cmd) });
         return;
       }
     }
@@ -158,15 +184,19 @@ export function parseScript(root: string, scriptPath: string): LaunchScriptHit |
 
   const port = extractPort(best.command, content) ?? best.defPort;
   const explicitInterpreter = /\.venv[\\/]|\bvenv[\\/]/.test(best.command);
+  // Start-Process 提取出的 exe 且文件真实存在 → 高置信（启动命令可直接执行）
+  const exeResolved = best.kind === 'exe' && best.exeExists === true;
   return {
     scriptPath,
     relative: path.relative(root, scriptPath).replace(/\\/g, '/'),
     command: best.command,
     kind: best.kind,
     port,
-    confidence: explicitInterpreter ? 'high' : 'medium',
+    confidence: explicitInterpreter || exeResolved ? 'high' : 'medium',
     reason: explicitInterpreter
       ? `从 ${path.basename(scriptPath)} 解析到带项目虚拟环境的启动命令`
+      : exeResolved
+        ? `从 ${path.basename(scriptPath)} 解析到 exe 启动命令（文件已确认存在）`
       : `从 ${path.basename(scriptPath)} 解析到启动命令（${best.kind}）`,
   };
 }

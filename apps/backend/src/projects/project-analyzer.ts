@@ -51,6 +51,9 @@ export class ProjectAnalyzer {
     const dirs = fs
       .readdirSync(root, { withFileTypes: true })
       .filter((d) => d.isDirectory() && !d.name.startsWith('.') && d.name !== 'node_modules')
+      // 测试/样例目录不是可运行服务：tests/ 里的 .test.mjs 可能内嵌 HTTP listener，
+      // 曾被识别成服务导致启动流程白跑一次 CLI 校验
+      .filter((d) => !/^(tests?|__tests__|fixtures?|examples?|e2e|spec|docs?|scripts?)$/i.test(d.name))
       .map((d) => path.join(root, d.name));
     dirs.unshift(root); // 根目录优先
 
@@ -96,20 +99,47 @@ export class ProjectAnalyzer {
 
       const start = scripts.dev ?? scripts.start ?? scripts.serve;
       if (start) {
-        // 前端/后端启发式：存在构建产物目录或 vite/webpack 依赖 → frontend，否则 backend
-        const isFrontend = !!(deps.vite || deps.webpack || deps['vue'] || deps.react);
+        // 前端/后端启发式：存在构建产物目录或 vite/webpack 依赖 → frontend，否则 backend；
+        // 无依赖声明时按启动入口内容判断（提供 text/html 静态页 → frontend）
+        let isFrontend = !!(deps.vite || deps.webpack || deps['vue'] || deps.react);
+        if (!isFrontend && !Object.keys(deps).length) {
+          const entryFile = (start.match(/node\s+(\S+\.(?:js|ts|mjs|cjs))/i) ?? [])[1];
+          if (entryFile) {
+            try {
+              const content = fs.readFileSync(path.join(root, entryFile), 'utf-8');
+              if (/text\/html|sendFile|\.html/i.test(content)) isFrontend = true;
+            } catch { /* 读不到按 backend 处理 */ }
+          }
+        }
+        // Next/Vite 前端端口：显式配置优先；Next（自定义 server 包装）默认 3000
+        const port = this.detectPort(root)
+          ?? (deps.next && isFrontend ? 3000 : undefined)
+          ?? (deps.vite ? 5173 : undefined);
         services.push({
-          name: pkg.name ? `${pkg.name}-main` : 'node-main',
+          // 服务名会被用作日志文件名/终端标题等本地标识：清洗 npm scope 包名里的
+          // / 等非法字符（@career-ops/web → career-ops_web），否则日志路径 ENOENT 炸进程
+          name: pkg.name ? `${String(pkg.name).replace(/[/\\:*?"<>|]/g, '_')}-main` : 'node-main',
           service_type: isFrontend ? 'frontend' : 'backend',
           workdir: root,
           start_command: `npm run ${(scripts.dev ? 'dev' : scripts.start ? 'start' : 'serve')}`,
           build_command: scripts.build ? 'npm run build' : undefined,
-          port: this.detectPort(root),
+          port,
         });
       } else {
-        unknowns.push('package.json 存在但没有可识别的 dev/start 脚本');
+        // monorepo（npm/pnpm/yarn workspaces）：根脚本只有 dev:web / dev:api 之类，
+        // 旧实现直接放弃 → 只靠 compose 里猜出来的 postgres，前端完全识别不到（实测 AIHOT-main）。
+        const wsServices = this.detectWorkspaceServices(root, pkg);
+        if (wsServices.length) {
+          services.push(...wsServices);
+        } else {
+          unknowns.push('package.json 存在但没有可识别的 dev/start 脚本');
+        }
       }
       if (!Object.keys(deps).length) unknowns.push('依赖未安装（node_modules 缺失或锁文件为空）');
+    } else {
+      // 无 package.json 的纯 node 服务（如 backend/server.js 直接 listen）：识别 .listen( 端口与启动命令
+      const jsSvc = this.detectJsListenService(root);
+      if (jsSvc) services.push(jsSvc);
     }
 
     // Java / Maven
@@ -117,7 +147,9 @@ export class ProjectAnalyzer {
       facts.language = 'java';
       facts.framework = facts.framework ?? 'spring-boot(候选)';
       facts.package_manager = 'maven';
-      const port = this.detectPort(root) ?? 8080;
+      // 端口按 Spring 约定位置解析：根目录 → src/main/resources（回归：之前只扫根目录，
+      // application.properties 里声明的端口被忽略，autostart 修复链路会把端口漂移到 8080）
+      const port = this.detectPort(root) ?? this.detectPort(path.join(root, 'src', 'main', 'resources')) ?? 8080;
       services.push({
         name: 'java-backend',
         service_type: 'backend',
@@ -165,12 +197,16 @@ export class ProjectAnalyzer {
       const backendEntry = this.findUvicornEntry(root);
       if (backendEntry && (pyDeps.has('fastapi') || pyDeps.has('uvicorn'))) {
         facts.framework = 'fastapi';
+        // 端口优先从入口文件的 uvicorn.run(..., port=N) 解析（回归：硬编码 8000 会撞
+        // Windows http.sys / 常见占用，且与用户声明的端口不符）
+        const entryFile = path.join(root, `${backendEntry.split(':')[0].replace(/\./g, '/')}.py`);
+        const uvPort = this.detectUvicornPort(entryFile) ?? 8000;
         services.push({
           name: 'fastapi-backend',
           service_type: 'backend',
           workdir: root,
-          start_command: `${prefix}uvicorn ${backendEntry} --host 127.0.0.1 --port 8000`,
-          port: 8000,
+          start_command: `${prefix}uvicorn ${backendEntry} --host 127.0.0.1 --port ${uvPort}`,
+          port: uvPort,
         });
       } else if (!services.length && has('app.py', 'main.py', 'webui.py', 'server.py')) {
         facts.framework = 'flask/fastapi(候选)';
@@ -236,43 +272,113 @@ export class ProjectAnalyzer {
     // Go / Rust / PHP
     if (has('go.mod')) {
       facts.language = 'go';
-      services.push({ name: 'go-app', service_type: 'backend', workdir: root, start_command: 'go run .' });
-      unknowns.push('Go 项目：入口与端口需确认');
+      let module = '';
+      try {
+        module = (/^module\s+(\S+)/m.exec(fs.readFileSync(path.join(root, 'go.mod'), 'utf-8')) ?? [])[1] ?? '';
+      } catch { /* ignore */ }
+      const hasMain = has('main.go') || fs.existsSync(path.join(root, 'cmd'));
+      if (hasMain) {
+        // TUI 程序（bubbletea/tview 等）需要交互终端：后台 spawn 无 TTY 会异常退出，
+        // 识别为 CLI 服务 → DevPilot 打开真实终端窗口运行
+        const goMod = (() => { try { return fs.readFileSync(path.join(root, 'go.mod'), 'utf-8'); } catch { return ''; } })();
+        const isTui = /charmbracelet\/bubbletea|tview|rivo\/tui/i.test(goMod);
+        // HTTP 服务端口：扫描 go 源码里 `:8080` 形式的默认监听端口
+        let goPort: number | undefined = this.detectPort(root);
+        if (!goPort && !isTui) {
+          try {
+            for (const f of fs.readdirSync(root).filter((f) => f.endsWith('.go'))) {
+              const m = /:(\d{4,5})['"]/.exec(fs.readFileSync(path.join(root, f), 'utf-8'));
+              if (m) { goPort = Number(m[1]); break; }
+            }
+          } catch { /* ignore */ }
+        }
+        services.push({
+          name: module ? module.split('/').pop()!.replace(/[/\\:*?"<>|]/g, '_') : 'go-app',
+          service_type: isTui ? 'cli' : 'backend',
+          workdir: root,
+          start_command: 'go run .',
+          port: isTui ? undefined : goPort,
+        });
+      } else {
+        unknowns.push('Go 项目：未找到 main.go / cmd/ 入口，无法确定运行方式');
+      }
     }
     if (has('Cargo.toml')) {
       facts.language = 'rust';
-      services.push({ name: 'rust-app', service_type: 'backend', workdir: root, start_command: 'cargo run' });
+      const hasBin = fs.existsSync(path.join(root, 'src', 'main.rs')) || has('src/bin');
+      if (hasBin) {
+        services.push({ name: 'rust-app', service_type: 'backend', workdir: root, start_command: 'cargo run' });
+      } else {
+        unknowns.push('Rust 项目：未找到 src/main.rs，可能是库 crate，无运行入口');
+      }
     }
     if (has('composer.json')) {
       facts.language = 'php';
-      unknowns.push('PHP 项目：启动方式需确认');
+      let composer: Record<string, unknown> = {};
+      try { composer = readJson(path.join(root, 'composer.json')); } catch { /* ignore */ }
+      const require = (composer.require ?? {}) as Record<string, string>;
+      const scripts = (composer.scripts ?? {}) as Record<string, string>;
+      if (fs.existsSync(path.join(root, 'artisan'))) {
+        // Laravel：artisan serve 端口默认 8000
+        services.push({ name: 'laravel', service_type: 'backend', workdir: root, start_command: 'php artisan serve --host=127.0.0.1 --port=8000', port: 8000 });
+        facts.framework = 'laravel';
+      } else if (scripts.start || scripts.serve) {
+        const cmd = scripts.start ?? scripts.serve;
+        services.push({ name: 'php-app', service_type: 'backend', workdir: root, start_command: `composer run ${scripts.start ? 'start' : 'serve'}` });
+        void cmd;
+      } else if (require['laravel/framework']) {
+        facts.framework = 'laravel';
+        unknowns.push('PHP Laravel 项目：未找到 artisan 入口，请确认项目结构');
+      } else {
+        unknowns.push('PHP 项目：启动方式需确认');
+      }
     }
 
     // docker-compose → 基础服务（DB/缓存类标记 shared 候选）
-    const compose = path.join(root, 'docker-compose.yml');
-    if (fs.existsSync(compose)) {
+    // 旧实现按关键词匹配文本，猜出的名字（postgres）和 compose 里真实服务名（db）不一致，
+    // 生成的 `docker compose up -d postgres` 根本起不来；这里解析真实服务键与镜像。
+    const compose = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
+      .map((f) => path.join(root, f))
+      .find((f) => fs.existsSync(f));
+    if (compose) {
       facts.project_type = 'docker-compose';
-      const text = fs.readFileSync(compose, 'utf-8');
-      for (const [svc, type] of [
-        ['mysql', 'database'], ['postgres', 'database'], ['redis', 'cache'],
-        ['mongo', 'database'], ['rabbitmq', 'mq'], ['kafka', 'mq'],
-      ] as const) {
-        if (text.includes(svc)) {
-          services.push({
-            name: svc,
-            service_type: type,
-            workdir: root,
-            start_command: `docker compose up -d ${svc}`,
-            shared: true,
-          });
+      const composeServices = this.parseComposeServices(compose);
+      // 本地开发优先跑 workspace 里原生应用（热更新、可调试），compose 只兜底基础设施。
+      // 若已有原生应用服务，就不再为 compose 里的同名应用（api/web/worker 容器）建重复服务。
+      const hasNativeApps = services.some((s) => s.service_type === 'frontend' || s.service_type === 'backend');
+      for (const svc of composeServices) {
+        const oneShot = /^(setup|migrate|migration|seed|init|initdb|bootstrap|job|cron)$/i.test(svc.name);
+        if (oneShot) continue;
+        if (hasNativeApps && svc.kind === 'app') continue;
+        services.push({
+          name: svc.name,
+          service_type: svc.kind,
+          workdir: root,
+          start_command: `docker compose up -d ${svc.name}`,
+          port: svc.hostPort,
+          shared: svc.kind !== 'app',
+        });
+      }
+      // 原生应用依赖基础设施：补 depends_on，启动顺序 = db/cache → api/web/worker
+      const infra = composeServices.filter((c) => c.kind !== 'app').map((c) => c.name);
+      if (infra.length) {
+        for (const s of services) {
+          if (s.workdir === root && (s.service_type === 'frontend' || s.service_type === 'backend') && !s.depends_on?.length) {
+            s.depends_on = infra;
+          }
         }
       }
     }
 
-    // .NET
-    if (fs.readdirSync(root).some((f) => f.endsWith('.sln'))) {
+    // .NET：sln / csproj
+    const dotnetProj = fs.readdirSync(root).find((f) => f.endsWith('.sln') || f.endsWith('.csproj'));
+    if (dotnetProj) {
       facts.language = 'c#';
-      unknowns.push('.NET 解决方案：项目结构需进一步分析');
+      if (dotnetProj.endsWith('.csproj')) {
+        services.push({ name: path.basename(dotnetProj, '.csproj'), service_type: 'backend', workdir: root, start_command: 'dotnet run' });
+      } else {
+        unknowns.push('.NET 解决方案：项目结构需进一步分析（多项目 sln 需确认启动项目）');
+      }
     }
 
     // 编译产物分发目录：独立 exe + bat 启动脚本（如 Go/Rust 发布目录）
@@ -291,6 +397,127 @@ export class ProjectAnalyzer {
       unknowns.push(`目录 ${path.basename(root)}：未识别出可启动服务`);
 
     return { facts, services, unknowns };
+  }
+
+  /**
+   * npm/pnpm/yarn workspaces 子包识别（monorepo）。
+   * 只认带 dev/start/serve 脚本的子包；端口按「脚本里的 --port」→「.env 里的 *_PORT」→ 框架默认 的顺序确定。
+   */
+  private static detectWorkspaceServices(root: string, pkg: Record<string, unknown>): ServiceDraft[] {
+    const raw = pkg.workspaces as unknown;
+    const patterns: string[] = Array.isArray(raw)
+      ? raw.map(String)
+      : Array.isArray((raw as { packages?: unknown })?.packages)
+        ? ((raw as { packages: unknown[] }).packages).map(String)
+        : [];
+    if (!patterns.length) return [];
+
+    const dirs = new Set<string>();
+    for (const pat of patterns) {
+      // "apps/*" → base "apps"；"packages/foo" → 直接是包目录
+      const clean = pat.replace(/\/?\*+$/, '').replace(/\/+$/, '');
+      const base = path.join(root, clean);
+      if (pat.endsWith('*')) {
+        if (!fs.existsSync(base)) continue;
+        for (const d of fs.readdirSync(base, { withFileTypes: true })) {
+          if (d.isDirectory()) dirs.add(path.join(base, d.name));
+        }
+      } else if (fs.existsSync(path.join(base, 'package.json'))) {
+        dirs.add(base);
+      }
+    }
+
+    const envPorts = this.readEnvPorts(root);
+    const out: ServiceDraft[] = [];
+    for (const dir of dirs) {
+      const pkgFile = path.join(dir, 'package.json');
+      if (!fs.existsSync(pkgFile)) continue;
+      let wp: Record<string, unknown>;
+      try { wp = JSON.parse(fs.readFileSync(pkgFile, 'utf-8')) as Record<string, unknown>; } catch { continue; }
+      const scripts = (wp.scripts ?? {}) as Record<string, string>;
+      const scriptKey = scripts.dev ? 'dev' : scripts.start ? 'start' : scripts.serve ? 'serve' : null;
+      if (!scriptKey) continue;
+      const deps = { ...(wp.dependencies as object), ...(wp.devDependencies as object) } as Record<string, string>;
+      const isFrontend = !!(deps.react || deps['react-dom'] || deps.vue || deps.next || deps['@react-router/dev'] || deps['@sveltejs/kit'] || deps.vite);
+      const rawName = String(wp.name ?? path.basename(dir));
+      const name = rawName.replace(/^@/, '').replace(/[/\\:*?"<>|]/g, '_');
+      const shortName = name.split('_').pop() ?? name;
+      const port = this.parsePortFromScript(scripts[scriptKey])
+        ?? envPorts.get(name)
+        ?? envPorts.get(shortName)
+        ?? (isFrontend ? 5173 : undefined);
+      out.push({
+        name,
+        service_type: isFrontend ? 'frontend' : 'backend',
+        workdir: root,
+        start_command: `npm run ${scriptKey} -w ${rawName}`,
+        build_command: scripts.build ? `npm run build -w ${rawName}` : undefined,
+        port,
+      });
+    }
+    return out;
+  }
+
+  /** 从启动脚本里读端口：--port 3000 / --port=3000 / -p 3000 */
+  private static parsePortFromScript(script: string | undefined): number | undefined {
+    if (!script) return undefined;
+    const m = /(?:--port[=\s]+|-p\s+)(\d{2,5})/.exec(script);
+    if (!m) return undefined;
+    const n = Number(m[1]);
+    return Number.isInteger(n) && n > 0 && n < 65536 ? n : undefined;
+  }
+
+  /** 读取根 .env / .env.example / compose 里的 *PORT 变量，映射到包名后缀（AIHOT_API_PORT → aihot_api / api） */
+  private static readEnvPorts(root: string): Map<string, number> {
+    const map = new Map<string, number>();
+    const files = ['.env', '.env.example', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'];
+    for (const file of files) {
+      const full = path.join(root, file);
+      if (!fs.existsSync(full)) continue;
+      for (const line of fs.readFileSync(full, 'utf-8').split(/\r?\n/)) {
+        // 兼容 .env 的 KEY=1234 与 compose 的 KEY: "1234"
+        const m = /^\s*-?\s*([A-Za-z_][\w.]*PORT)\s*[:=]\s*["']?(\d{2,5})["']?\s*$/.exec(line);
+        if (!m) continue;
+        const port = Number(m[2]);
+        if (!Number.isInteger(port) || port <= 0 || port >= 65536) continue;
+        const key = m[1].toLowerCase();
+        map.set(key, port);
+        map.set(key.replace(/_port$/, ''), port);
+      }
+    }
+    return map;
+  }
+
+  /** 解析 compose 的 services 段：服务名、类型（按镜像）、宿主机端口 */
+  private static parseComposeServices(file: string): Array<{ name: string; kind: string; hostPort?: number }> {
+    const lines = fs.readFileSync(file, 'utf-8').split(/\r?\n/);
+    const out: Array<{ name: string; kind: string; hostPort?: number }> = [];
+    let inServices = false;
+    let current: { name: string; kind: string; hostPort?: number } | null = null;
+    for (const raw of lines) {
+      const line = raw.replace(/\t/g, '  ');
+      if (/^services:\s*$/.test(line)) { inServices = true; continue; }
+      if (/^[A-Za-z_][\w.-]*:\s*$/.test(line) && !/^\s/.test(line)) { inServices = false; current = null; continue; }
+      if (!inServices) continue;
+      const svc = /^ {2}([A-Za-z0-9_.-]+):\s*$/.exec(line);
+      if (svc) {
+        if (current) out.push(current);
+        current = { name: svc[1], kind: 'app' };
+        continue;
+      }
+      if (!current) continue;
+      const img = /^ {4}image:\s*["']?([^"'\s]+)/.exec(line);
+      if (img) {
+        const image = img[1].toLowerCase();
+        if (/postgres|mysql|mariadb|mongo|clickhouse/.test(image)) current.kind = 'database';
+        else if (/redis|memcached|valkey/.test(image)) current.kind = 'cache';
+        else if (/rabbitmq|kafka|nats|elasticsearch/.test(image)) current.kind = 'mq';
+      }
+      const port = /^\s*-\s*["']?(\d{2,5}):\d{2,5}["']?/.exec(line);
+      if (port && !current.hostPort) current.hostPort = Number(port[1]);
+    }
+    if (current) out.push(current);
+    return out;
   }
 
   /**
@@ -447,6 +674,12 @@ export class ProjectAnalyzer {
   }
 
   private static detectPort(root: string): number | undefined {
+    // Spring Boot: application.properties 的 server.port=N（回归：之前只扫 vite/webpack/.env）
+    const props = path.join(root, 'application.properties');
+    if (fs.existsSync(props)) {
+      const m = fs.readFileSync(props, 'utf-8').match(/^\s*server\.port\s*=\s*(\d{2,5})\s*$/m);
+      if (m) return Number(m[1]);
+    }
     const candidates = ['vite.config.ts', 'vite.config.js', 'vue.config.js', 'webpack.config.js', '.env'];
     for (const f of candidates) {
       const p = path.join(root, f);
@@ -460,6 +693,77 @@ export class ProjectAnalyzer {
       const m = fs.readFileSync(cfg, 'utf-8').match(/"listen"\s*:\s*"[\d.]*:(\d{2,5})"/);
       if (m) return Number(m[1]);
     }
+    // JS 入口 listen 端口（const PORT = 1234; ... listen(PORT) 或 listen(1234)）
+    const jsPort = this.detectJsListenPort(root);
+    if (jsPort) return jsPort;
+    // Python 入口 uvicorn.run(..., port=N)
+    for (const f of ['main.py', 'app.py', 'server.py', 'webui.py']) {
+      const p = path.join(root, f);
+      if (!fs.existsSync(p)) continue;
+      const port = this.detectUvicornPort(p);
+      if (port) return port;
+    }
     return undefined;
+  }
+
+  /** 从 JS 入口文件解析 listen 端口（仅扫根目录一层，跳过 node_modules） */
+  private static detectJsListenPort(root: string): number | undefined {
+    let files: string[] = [];
+    try {
+      files = fs.readdirSync(root).filter((f) => /\.(js|ts|mjs|cjs)$/i.test(f)).map((f) => path.join(root, f));
+    } catch { return undefined; }
+    for (const file of files) {
+      let text: string;
+      try { text = fs.readFileSync(file, 'utf-8'); } catch { continue; }
+      const m = text.match(/\.listen\(\s*(\d{2,5})\b/);
+      if (m) return Number(m[1]);
+      const varM = text.match(/\.listen\(\s*([A-Za-z_$][\w$]*)/);
+      if (varM) {
+        const def = text.match(new RegExp(`(?:const|let|var)\\s+${varM[1]}\\s*=\\s*(\\d{2,5})`));
+        if (def) return Number(def[1]);
+      }
+    }
+    return undefined;
+  }
+
+  /** 从 uvicorn.run(..., port=N) 解析端口 */
+  private static detectUvicornPort(entryFile: string): number | undefined {
+    try {
+      const text = fs.readFileSync(entryFile, 'utf-8');
+      const m = text.match(/uvicorn\.run\([^)]{0,300}?port\s*=\s*(\d{2,5})/s);
+      if (m) return Number(m[1]);
+    } catch { /* ignore */ }
+    return undefined;
+  }
+
+  /** 无 package.json 的纯 node 服务：扫描根目录 JS/TS，取第一个含 listen 的入口 */
+  private static detectJsListenService(root: string): ServiceDraft | null {
+    let files: string[] = [];
+    try {
+      files = fs.readdirSync(root).filter((f) => /\.(js|ts|mjs|cjs)$/i.test(f)).map((f) => path.join(root, f));
+    } catch { return null; }
+    // 常见命名优先
+    files.sort((a, b) => {
+      const rank = (p: string) => (/^(server|app|index|main)\.(js|ts|mjs|cjs)$/i.test(path.basename(p)) ? 0 : 1);
+      return rank(a) - rank(b);
+    });
+    for ( const file of files) {
+      // 测试/配置文件不是服务入口（.test.mjs 内嵌 listen 曾被误识别成服务）
+      if (/\.(test|spec|config|setup)\.(js|ts|mjs|cjs)$/i.test(path.basename(file))) continue;
+      let text: string;
+      try { text = fs.readFileSync(file, 'utf-8'); } catch { continue; }
+      if (!/\.listen\(/.test(text)) continue;
+      const port = this.detectJsListenPort(root);
+      // 静态 HTML 服务 → frontend；API/JSON 服务 → backend
+      const kind: 'frontend' | 'backend' = /text\/html|sendFile|\.html/i.test(text) ? 'frontend' : 'backend';
+      return {
+        name: `${path.basename(root)}-node`,
+        service_type: kind,
+        workdir: root,
+        start_command: `node ${path.basename(file)}`,
+        port,
+      };
+    }
+    return null;
   }
 }

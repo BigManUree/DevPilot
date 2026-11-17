@@ -10,6 +10,7 @@ import { ProjectAnalyzer, type AnalysisResult } from '../project-analyzer';
 import { ProfileEngine } from '../analyzer/profile';
 import { safeExtractArchive } from './safe-archive';
 import { GitImportService } from '../git-import.service';
+import { ConfigCheckService } from '../config-check.service';
 
 /**
  * 统一项目导入（升级任务书 §三）：
@@ -137,6 +138,7 @@ export class UnifiedImportService {
     private readonly ds: DatabaseService,
     private readonly events: EventsGateway,
     private readonly gitImport: GitImportService,
+    private readonly configCheck: ConfigCheckService,
   ) {}
 
   /** 发起统一导入（异步 job，返回 jobId） */
@@ -331,8 +333,27 @@ export class UnifiedImportService {
         }
       }
 
+      // 配置体检（导入即验证）：.env 完整性、Key 真实可用性、DB 连通、端口、启动命令可疑性。
+      // 失败只记录警告，不阻断导入——项目仍可导入后再修配置。
+      let cfgSummary = '';
+      try {
+        this.broadcast(ctx, { phase: 'config-check', percent: 95, message: '正在校验项目配置（.env / API Key / 数据库 / 端口）…' });
+        const cfg = await this.configCheck.check(projectId, { probe: true });
+        const bad = cfg.items.filter((i) => i.status === 'fail');
+        const warn = cfg.items.filter((i) => i.status === 'warn');
+        cfgSummary = cfg.overall === 'ok' ? '，配置体检通过' : `，配置体检 ${bad.length} 项不通过 / ${warn.length} 项需注意（详情见项目详情 → 配置体检）`;
+        this.broadcast(ctx, {
+          phase: 'config-check',
+          percent: 98,
+          message: `配置体检：${cfg.overall === 'ok' ? '全部通过' : `${bad.length} 项不通过 / ${warn.length} 项需注意`}`,
+          detail: [...bad, ...warn].slice(0, 6).map((i) => `${i.label}：${i.detail}`).join('\n'),
+        });
+      } catch (e) {
+        this.broadcast(ctx, { phase: 'config-check', percent: 98, message: `配置体检未能完成（不影响导入）：${String((e as Error)?.message ?? e).slice(0, 120)}` });
+      }
+
       this.ds.db.prepare(`UPDATE import_jobs SET status='done', phase='done', percent=100, project_id=?, message=?, finished_at=?, updated_at=? WHERE id=?`)
-        .run(projectId, `导入完成：${profile.components.length} 组件 / ${analysis.services.length} 服务`, new Date().toISOString(), new Date().toISOString(), ctx.id);
+        .run(projectId, `导入完成：${profile.components.length} 组件 / ${analysis.services.length} 服务${cfgSummary}`, new Date().toISOString(), new Date().toISOString(), ctx.id);
       this.broadcast(ctx, { phase: 'done', percent: 100, message: `导入完成（项目 ${projectId.slice(0, 8)}）` });
     } catch (err) {
       if (ctx.cancelled) return; // cancel() 已更新状态
