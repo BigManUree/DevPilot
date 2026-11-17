@@ -53,26 +53,53 @@ export class SystemController {
    * 更新清单来源 DEVIPILOT_UPDATE_MANIFEST（URL 或本地文件），缺省 → updateAvailable=false。
    * 清单格式：{ "latestVersion": "x.y.z", "downloadUrl": "...", "notes"?: "..." }
    */
+  /** 清单缓存：10 分钟内复用，避免每次打开设置页都打远端（审计 P-01） */
+  private manifestCache: { source: string; at: number; value: UpdateCheckResult } | null = null;
+  private static readonly MANIFEST_TTL_MS = 10 * 60_000;
+
   @Get('update-check')
-  updateCheck() {
+  async updateCheck() {
     const current = '0.1.0';
     const source = process.env.DEVIPILOT_UPDATE_MANIFEST;
-    const base = { currentVersion: current, source: source ?? null, updateAvailable: false, latestVersion: current as string | null, downloadUrl: null as string | null, notes: null as string | null, error: null as string | null };
+    const base: UpdateCheckResult = {
+      currentVersion: current,
+      source: source ?? null,
+      updateAvailable: false,
+      latestVersion: current as string | null,
+      downloadUrl: null as string | null,
+      notes: null as string | null,
+      error: null as string | null,
+    };
     if (!source) return base;
+    if (this.manifestCache && this.manifestCache.source === source && Date.now() - this.manifestCache.at < SystemController.MANIFEST_TTL_MS) {
+      return this.manifestCache.value;
+    }
     try {
+      // 审计 P-01：旧实现用 execSync 起子进程取清单，会阻塞整个事件循环（实测 /health 被卡 4s）。
+      // 改成本进程异步 fetch + 5s 超时；失败只在 error 字段里体现，不抛。
       let text: string;
       if (/^https?:\/\//.test(source)) {
-        // 同步获取成本可接受（检查频率低）；超时 5s
-        const { execSync } = require('node:child_process') as typeof import('node:child_process');
-        text = execSync(`node -e "fetch(process.argv[1]).then(r=>r.text()).then(t=>console.log(t))" "${source}"`, { timeout: 6000, windowsHide: true }).toString();
+        const res = await fetch(source, { signal: AbortSignal.timeout(5000) });
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        text = await res.text();
       } else {
         text = require('node:fs').readFileSync(source, 'utf-8');
       }
-      const manifest = JSON.parse(text) as { latestVersion: string; downloadUrl?: string; notes?: string; sha256?: string };
+      const manifest = JSON.parse(text) as { latestVersion?: string; downloadUrl?: string; notes?: string; sha256?: string };
+      if (!manifest?.latestVersion || typeof manifest.latestVersion !== 'string') throw new Error('清单缺少 latestVersion 字段');
       const newer = this.compareVersions(manifest.latestVersion, current) > 0;
-      return { ...base, latestVersion: manifest.latestVersion, downloadUrl: manifest.downloadUrl ?? null, notes: manifest.notes ?? null, updateAvailable: newer, ...(manifest.sha256 ? { __sha: manifest.sha256 } : {}) };
+      const value: UpdateCheckResult = {
+        ...base,
+        latestVersion: manifest.latestVersion,
+        downloadUrl: manifest.downloadUrl ?? null,
+        notes: manifest.notes ?? null,
+        updateAvailable: newer,
+        ...(manifest.sha256 ? { __sha: manifest.sha256 } : {}),
+      };
+      this.manifestCache = { source, at: Date.now(), value };
+      return value;
     } catch (e) {
-      return { ...base, error: String(e).slice(0, 150) };
+      return { ...base, error: String((e as Error)?.message ?? e).slice(0, 150) };
     }
   }
 
@@ -85,28 +112,28 @@ export class SystemController {
     const crypto = require('node:crypto') as typeof import('node:crypto');
     const fs = require('node:fs') as typeof import('node:fs');
     const path = require('node:path') as typeof import('node:path');
-    const check = this.updateCheck();
+    const check = await this.updateCheck();
     if (!check.updateAvailable) return { ok: false, error: check.error ?? '无可用更新' };
     if (!check.downloadUrl) return { ok: false, error: '清单未提供 downloadUrl' };
     const dir = path.join(process.env.DEVIPILOT_DATA_DIR ?? path.join(process.env.APPDATA ?? process.cwd(), 'devpilot', 'data'), 'downloads');
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, `devpilot-${check.latestVersion}.zip`);
     try {
-      const res = await fetch(check.downloadUrl);
+      const res = await fetch(check.downloadUrl, { signal: AbortSignal.timeout(10 * 60_000) });
       if (!res.ok || !res.body) throw new Error(`download failed: ${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
       if (buf.length === 0) throw new Error('empty payload');
       const sha = crypto.createHash('sha256').update(buf).digest('hex');
-      if (checkNotesSha(check as any) && checkNotesSha(check as any) !== sha) {
-        return { ok: false, error: `SHA256 校验失败：expected ${checkNotesSha(check as any)} got ${sha}` };
+      const expected = (check as unknown as { __sha?: string }).__sha ?? null;
+      if (expected && expected !== sha) {
+        return { ok: false, error: `SHA256 校验失败：expected ${expected} got ${sha}` };
       }
       fs.writeFileSync(file, buf);
       this.notify.create({ type: 'update.downloaded', title: `新版本 ${check.latestVersion} 已下载就绪`, content: file, priority: 3 });
       return { ok: true, file, size: buf.length, sha256: sha };
     } catch (e) {
-      return { ok: false, error: String(e).slice(0, 200) };
+      return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 200) };
     }
-    function checkNotesSha(c: any): string | null { return (c as any).__sha ?? null; }
   }
 
   /** 逐段数值比较：>0 表示 a 更新 */
@@ -118,4 +145,16 @@ export class SystemController {
     }
     return 0;
   }
+}
+
+/** 更新检查结果（缓存与前端共用同一形状） */
+interface UpdateCheckResult {
+  currentVersion: string;
+  source: string | null;
+  updateAvailable: boolean;
+  latestVersion: string | null;
+  downloadUrl: string | null;
+  notes: string | null;
+  error: string | null;
+  __sha?: string;
 }

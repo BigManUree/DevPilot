@@ -174,6 +174,13 @@ const RULES: ErrorRule[] = [
 ];
 
 /** 规则分类（确定性）。返回置信度最高的类别；无命中返回 unknown。 */
+/** 证据行脱敏：密钥类赋值一律掩码（审计要求：敏感信息不进入诊断/日志） */
+export function redactEvidenceLine(line: string): string {
+  return line
+    .replace(/(password|passwd|pwd|token|secret|api[_-]?key|authorization)\s*[=:]\s*("[^"]*"|'[^']*'|\S+)/gi, '$1=***REDACTED***')
+    .replace(/(mysql:\/\/|postgres:\/\/|redis:\/\/)[^\s@]+:[^@]+@/gi, '$1***:***@');
+}
+
 export function classifyError(logText: string): DiagnosisResult {
   const evidence: string[] = [];
   let best: { rule: ErrorRule; score: number } | null = null;
@@ -186,7 +193,7 @@ export function classifyError(logText: string): DiagnosisResult {
       if (m) {
         score += 2;
         const idx = m.index ?? 0;
-        hits.push(logText.slice(Math.max(0, idx - 80), idx + m[0].length + 120).trim().slice(0, 300));
+        hits.push(redactEvidenceLine(logText.slice(Math.max(0, idx - 80), idx + m[0].length + 120).trim().slice(0, 300)));
       }
     }
     if (score > (best?.score ?? 0)) best = { rule, score };
@@ -202,7 +209,7 @@ export function classifyError(logText: string): DiagnosisResult {
         category: 'unknown',
         confidence: 0.3,
         summary: '检测到错误输出但未匹配已知规则，需要 LLM 深入分析或人工排查。',
-        evidence: lines.map((l) => l.slice(0, 300)),
+        evidence: lines.map((l) => redactEvidenceLine(l.slice(0, 300))),
       };
     }
     return { category: 'unknown', confidence: 0.1, summary: '日志中未发现明显错误特征。', evidence: [] };

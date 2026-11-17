@@ -127,7 +127,17 @@ export class McpController {
 
   /** GET：服务端→客户端 SSE 通知流（keepalive 保活，客户端断连即清理定时器） */
   @Get()
-  stream(@Res() res: any) {
+  stream(@Res() res: any, @Headers('accept') accept?: string) {
+    // 审计 C-08：不带 Accept: text/event-stream 的普通 GET（curl/浏览器直接访问）
+    // 过去也会挂一条永不结束的连接；按 MCP 规范应回 405。
+    if (!accept || !accept.includes('text/event-stream')) {
+      res.status(405).json({
+        statusCode: 405,
+        error: 'Method Not Allowed',
+        message: 'MCP 流式通道只接受 GET + Accept: text/event-stream；JSON-RPC 请用 POST /api/v1/mcp',
+      });
+      return;
+    }
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');

@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { GitService } from './git.service';
+import { parseBoundedInt } from '../http-params';
 
 @Controller('api/v1/git')
 export class GitController {
@@ -27,7 +28,7 @@ export class GitController {
 
   @Get('log')
   log(@Query('repoPath') repoPath: string, @Query('limit') limit?: string) {
-    return this.svc.log(repoPath, limit ? Number(limit) : 20);
+    return this.svc.log(repoPath, parseBoundedInt(limit, { fallback: 20, min: 1, max: 200, name: 'limit' }));
   }
 
   @Get('diff')

@@ -1,4 +1,4 @@
-import { Controller, Get, Param } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { EnvironmentService } from './environment.service';
 
 @Controller('api/v1/environments')
@@ -6,8 +6,8 @@ export class EnvironmentController {
   constructor(private readonly svc: EnvironmentService) {}
 
   @Get()
-  detectAll() {
-    return this.svc.detectAll();
+  detectAll(@Query('refresh') refresh?: string) {
+    return this.svc.detectAll(refresh === '1');
   }
 
   @Get('check/:projectId')
@@ -37,5 +37,11 @@ export class EnvironmentController {
   @Get('env-vars/:projectId')
   checkEnvVars(@Param('projectId') projectId: string) {
     return this.svc.checkEnvVars(projectId);
+  }
+
+  /** 配置向导保存：验证用户输入 → 写回项目根 .env → 返回仍未通过项（循环直到全部可用） */
+  @Post('env-config/:projectId')
+  saveEnvConfig(@Param('projectId') projectId: string, @Body() body: { values?: Record<string, string> }) {
+    return this.svc.saveEnvConfig(projectId, body?.values ?? {});
   }
 }

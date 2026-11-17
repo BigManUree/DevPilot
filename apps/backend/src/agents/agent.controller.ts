@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, NotFoundException } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, NotFoundException, ConflictException } from '@nestjs/common';
 import { ModelService } from './model.service';
 import { AgentService } from './agent.service';
 
@@ -81,6 +81,28 @@ export class AgentController {
   @Post('tasks/:taskId/cancel')
   cancelTask(@Param('taskId') taskId: string) {
     return this.agents.cancelTask(taskId);
+  }
+
+  /** 重命名任务会话（仅改显示标题） */
+  @Post('tasks/:taskId/rename')
+  renameTask(@Param('taskId') taskId: string, @Body() body: { title?: string }) {
+    try {
+      return this.agents.renameTask(taskId, body?.title ?? '');
+    } catch (err) {
+      if (err instanceof NotFoundException || err instanceof ConflictException) throw err;
+      return { taskId, title: '', error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** 删除任务会话（级联清理执行记录/计划版本/记忆）；执行中的任务需先取消 */
+  @Delete('tasks/:taskId')
+  deleteTask(@Param('taskId') taskId: string) {
+    try {
+      return this.agents.deleteTask(taskId);
+    } catch (err) {
+      if (err instanceof NotFoundException || err instanceof ConflictException) throw err;
+      return { taskId, deleted: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   @Post('tasks/:taskId/pause')

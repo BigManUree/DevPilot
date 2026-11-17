@@ -109,4 +109,20 @@ export class NotificationService {
     this.ds.db.prepare('DELETE FROM notifications WHERE id = ?').run(id);
     return { ok: true };
   }
+
+  /** 批量删除：仅允许传入存在且数量受控的 ID 清单 */
+  removeBatch(ids: string[]): { ok: boolean; deleted: number; error?: string } {
+    if (!Array.isArray(ids) || !ids.length) return { ok: false, deleted: 0, error: 'ids 不能为空' };
+    if (ids.length > 500) return { ok: false, deleted: 0, error: '单次最多删除 500 条' };
+    const stmt = this.ds.db.prepare('DELETE FROM notifications WHERE id = ?');
+    const run = this.ds.db.transaction(() => {
+      let deleted = 0;
+      for (const id of ids) {
+        if (typeof id !== 'string' || !id.trim()) continue;
+        deleted += stmt.run(id).changes;
+      }
+      return deleted;
+    });
+    return { ok: true, deleted: run() };
+  }
 }

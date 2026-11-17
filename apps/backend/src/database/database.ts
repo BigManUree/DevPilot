@@ -645,7 +645,34 @@ const V17: Migration = {
   },
 };
 
-export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17];
+/** V18：参数级审批（审批/授权绑定具体工具与规范化参数摘要；one_shot 消费型授权） */
+const V18: Migration = {
+  version: 18,
+  name: 'param-scoped-approvals',
+  up: (db) => {
+    // approvals：记录绑定到的具体工具、参数摘要哈希与风险说明（供审批 UI 展示与追溯）
+    db.exec(`ALTER TABLE approvals ADD COLUMN param_json TEXT`);
+    db.exec(`ALTER TABLE approvals ADD COLUMN param_hash TEXT`);
+    db.exec(`ALTER TABLE approvals ADD COLUMN risk_reasons TEXT`);
+    // permissions：scope_kind='category'（旧类别级授权，旧行默认）| 'param'（参数级，批准单次调用）
+    db.exec(`ALTER TABLE permissions ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'category'`);
+    db.exec(`ALTER TABLE permissions ADD COLUMN param_hash TEXT`);
+    db.exec(`ALTER TABLE permissions ADD COLUMN one_shot INTEGER NOT NULL DEFAULT 0`);
+    db.exec(`ALTER TABLE permissions ADD COLUMN used_at TEXT`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_perm_param ON permissions(subject_type, subject_id, category, param_hash)`);
+  },
+};
+
+/** V19：项目自定义图标（icon_path 为绝对路径，指向 dataDir/icons/ 下的图片；空 = 默认字母头像） */
+const V19: Migration = {
+  version: 19,
+  name: 'project-icons',
+  up: (db) => {
+    db.exec(`ALTER TABLE projects ADD COLUMN icon_path TEXT`);
+  },
+};
+
+export const MIGRATIONS: Migration[] = [V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19];
 
 export function openDatabase(dataDir: string): Database.Database {
   fs.mkdirSync(dataDir, { recursive: true });
@@ -664,9 +691,11 @@ function migrate(db: Database.Database, dataDir: string) {
     applied_at TEXT NOT NULL
   )`);
   const current = (db.prepare('SELECT MAX(version) v FROM schema_migrations').get() as { v: number | null }).v ?? 0;
+  let applied = 0;
 
   for (const m of MIGRATIONS) {
     if (m.version <= current) continue;
+    applied += 1;
     // 迁移前备份当前数据库文件
     const dbPath = path.join(dataDir, 'devpilot.db');
     if (fs.existsSync(dbPath)) {
@@ -685,4 +714,34 @@ function migrate(db: Database.Database, dataDir: string) {
       throw new Error(`migration v${m.version} (${m.name}) failed: ${String(err)}`);
     }
   }
+
+  // 迁移备份保留策略（审计 P-04）：历史库备份只留最近 5 份（DEVIPILOT_MIGRATION_BACKUP_KEEP 可调）。
+  // 旧实现每升一版留一份永不清理，实测 12 份 / 15MB。只在本次真的执行了迁移时清理，避免每次启动都扫盘。
+  if (applied > 0) pruneMigrationBackups(dataDir);
+}
+
+/** 清理过多的迁移前备份：按 mtime 保留最近 N 份 */
+function pruneMigrationBackups(dataDir: string): void {
+  const keep = Math.max(1, Number(process.env.DEVIPILOT_MIGRATION_BACKUP_KEEP ?? 5) || 5);
+  try {
+    const files = fs.readdirSync(dataDir)
+      .filter((f) => /^devpilot\.backup\.v\d+\..+\.db$/.test(f))
+      .map((f) => {
+        const full = path.join(dataDir, f);
+        try {
+          return { full, mtime: fs.statSync(full).mtimeMs };
+        } catch {
+          return null;
+        }
+      })
+      .filter((x): x is { full: string; mtime: number } => !!x)
+      .sort((a, b) => b.mtime - a.mtime);
+    for (const f of files.slice(keep)) {
+      try {
+        fs.rmSync(f.full, { force: true });
+        // eslint-disable-next-line no-console
+        console.log(`[db] 清理旧迁移备份 ${path.basename(f.full)}（保留最近 ${keep} 份）`);
+      } catch { /* 删不掉不影响启动 */ }
+    }
+  } catch { /* 目录不可读忽略 */ }
 }

@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
 import { TerminalService } from './terminal.service';
 import { LogService } from '../logs/log.service';
+import { parseBoundedInt } from '../http-params';
 
 /**
  * 终端与日志 REST（API 设计：日志与诊断域 + 终端域）。
@@ -46,8 +47,8 @@ export class TerminalController {
   ) {
     return this.logs.query({
       level, sourceModule, projectId, taskId, traceId,
-      limit: limit ? Number(limit) : undefined,
-      offset: offset ? Number(offset) : undefined,
+      limit: parseBoundedInt(limit, { fallback: 100, min: 1, max: 1000, name: 'limit' }),
+      offset: parseBoundedInt(offset, { fallback: 0, min: 0, max: 1_000_000, name: 'offset' }),
     });
   }
 

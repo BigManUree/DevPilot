@@ -3,7 +3,7 @@ import { spawn, ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventsGateway } from '../events.gateway';
 import { LogService } from '../logs/log.service';
-import { platform as plat } from '@devpilot/platform-adapters';
+import { platform as plat, cleanServiceEnv } from '@devpilot/platform-adapters';
 
 /**
  * 终端会话管理（PRD 3.10）：
@@ -28,7 +28,7 @@ export class TerminalService implements OnApplicationShutdown {
     const sessionId = randomUUID();
     const workdir = cwd ?? process.cwd();
     const ishell = plat.interactiveShell();
-    const child = spawn(ishell.shell, ishell.args, { cwd: workdir, windowsHide: true });
+    const child = spawn(ishell.shell, ishell.args, { cwd: workdir, env: cleanServiceEnv(process.env), windowsHide: true });
 
     const session = { child, cwd: workdir, buffer: [] as string[] };
     this.sessions.set(sessionId, session);

@@ -1,5 +1,6 @@
-import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
 import { NotificationService } from './notification.service';
+import { parseBoundedInt } from '../http-params';
 
 @Controller('api/v1/notifications')
 export class NotificationsController {
@@ -7,7 +8,7 @@ export class NotificationsController {
 
   @Get()
   list(@Query('unreadOnly') unreadOnly?: string, @Query('limit') limit?: string) {
-    return this.svc.list({ unreadOnly: unreadOnly === '1', limit: limit ? Number(limit) : undefined });
+    return this.svc.list({ unreadOnly: unreadOnly === '1', limit: parseBoundedInt(limit, { fallback: 100, min: 1, max: 500, name: 'limit' }) });
   }
 
   @Get('unread-count')
@@ -15,6 +16,8 @@ export class NotificationsController {
 
   @Post()
   create(@Body() body: { type: string; title: string; content?: string; priority?: number }) {
+    if (!body || typeof body.type !== 'string' || !body.type.trim()) throw new BadRequestException('type 不能为空');
+    if (typeof body.title !== 'string' || !body.title.trim()) throw new BadRequestException('title 不能为空');
     return { id: this.svc.create(body) };
   }
 
@@ -23,6 +26,12 @@ export class NotificationsController {
 
   @Post('read-all')
   markAllRead() { return this.svc.markAllRead(); }
+
+  /** 批量删除（勾选的通知，一次最多 500 条） */
+  @Post('delete-batch')
+  removeBatch(@Body() body: { ids?: string[] }) {
+    return this.svc.removeBatch(Array.isArray(body?.ids) ? body.ids : []);
+  }
 
   // ---- 通知规则订阅（二阶段 #6）----
   @Get('rules')

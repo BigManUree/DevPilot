@@ -1,4 +1,5 @@
-import { Controller, Get, Post, Query, Body, Param } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Post, Query, Body, Param } from '@nestjs/common';
+import { parseBoundedInt } from '../http-params';
 import { randomUUID } from 'node:crypto';
 import { DatabaseService } from '../database/database.module';
 
@@ -12,7 +13,8 @@ export class MemoryController {
 
   @Post()
   create(@Body() b: { scope: 'global' | 'project' | 'task'; content: string; projectId?: string; taskId?: string; agentId?: string; source?: string; confidence?: number }) {
-    if (!['global', 'project', 'task'].includes(b.scope)) throw new Error('scope must be global|project|task');
+    if (!b || !['global', 'project', 'task'].includes(String(b.scope))) throw new BadRequestException('scope 必须是 global|project|task');
+    if (typeof b.content !== 'string' || !b.content.trim()) throw new BadRequestException('content 不能为空');
     const id = randomUUID();
     this.ds.db.prepare(
       `INSERT INTO memories (id, scope, project_id, task_id, agent_id, content_ref, source, confidence, version, access_policy, created_at)
@@ -32,9 +34,10 @@ export class MemoryController {
     if (scope) { where.push('scope = ?'); args.push(scope); }
     if (projectId) { where.push('project_id = ?'); args.push(projectId); }
     for (const t of terms) { where.push('content_ref LIKE ?'); args.push(`%${t}%`); }
+    const lim = parseBoundedInt(limit, { fallback: 20, min: 1, max: 200, name: 'limit' });
     const rows = this.ds.db.prepare(
       `SELECT * FROM memories WHERE ${where.join(' AND ')} ORDER BY confidence DESC, created_at DESC LIMIT ?`,
-    ).all(...args, Number(limit));
+    ).all(...args, lim);
     return { rows, total: rows.length };
   }
 
@@ -44,8 +47,9 @@ export class MemoryController {
     const args: string[] = [];
     if (scope) { where.push('scope = ?'); args.push(scope); }
     if (projectId) { where.push('project_id = ?'); args.push(projectId); }
+    const lim = parseBoundedInt(limit, { fallback: 50, min: 1, max: 500, name: 'limit' });
     const sql = `SELECT * FROM memories ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY created_at DESC LIMIT ?`;
-    return this.ds.db.prepare(sql).all(...args, Number(limit));
+    return this.ds.db.prepare(sql).all(...args, lim);
   }
 
   @Get(':id')

@@ -20,6 +20,12 @@ export class RuntimeController {
     return this.autostart.get(jobId) ?? { error: 'not found' };
   }
 
+  /** 用户手动取消启动：停掉已启动的服务，任务收尾为 Cancelled */
+  @Post('autostart/:jobId/cancel')
+  cancelAuto(@Param('jobId') jobId: string) {
+    return this.autostart.cancel(jobId);
+  }
+
   @Get('projects/:projectId/autostart')
   autoLatest(@Param('projectId') projectId: string) {
     return this.autostart.latest(projectId) ?? null;

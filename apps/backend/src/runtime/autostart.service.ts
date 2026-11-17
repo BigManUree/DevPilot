@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseService } from '../database/database.module';
 import { LogService } from '../logs/log.service';
+import { judgeFix } from './fix-guard';
 import { NotificationService } from '../notifications/notification.service';
 import { RuntimeService } from './runtime.service';
 import { AutoFixerService, type FixOutcome } from './auto-fixer.service';
@@ -31,7 +32,7 @@ export interface AutoStartJob {
   id: string;
   projectId: string;
   projectName: string;
-  status: 'Running' | 'Success' | 'Failed';
+  status: 'Running' | 'Success' | 'Failed' | 'Cancelled';
   startedAt: string;
   finishedAt?: string;
   attempt: number;
@@ -41,12 +42,35 @@ export interface AutoStartJob {
   pid?: number;
   report?: string;
   steps: AutoStartStep[];
+  /** 用户手动取消：启动循环在各检查点检测并尽快收尾 */
+  cancelRequested?: boolean;
+  /** 本 job 已成功启动的服务：取消时逐个停止，避免留下半启动状态 */
+  startedServiceIds: string[];
 }
 
 @Injectable()
 export class AutoStartService {
   private jobs = new Map<string, AutoStartJob>();
   private byProject = new Map<string, string>();
+
+  /** 热启动缓存：记录最近一次「同一命令 + 端口」通过健康校验的服务，下次启动改用轻量校验提速 */
+  private warmStarts = new Map<string, { command: string; port: number | null; at: number }>();
+  private static readonly WARM_TTL_MS = 24 * 60 * 60 * 1000;
+
+  private isWarmStart(serviceId: string, command: string, port: number | null): boolean {
+    const w = this.warmStarts.get(serviceId);
+    return !!w && w.command === command && w.port === port && Date.now() - w.at < AutoStartService.WARM_TTL_MS;
+  }
+
+  private recordWarmStart(serviceId: string, command: string, port: number | null): void {
+    this.warmStarts.set(serviceId, { command, port, at: Date.now() });
+  }
+
+  private invalidateWarmStart(serviceId: string): void {
+    this.warmStarts.delete(serviceId);
+  }
+  /** 每个 job 的取消信号：cancel() 触发 abort，中断 LLM 修复/端口等待/探测等长操作（取消 5 秒硬指标） */
+  private jobAbort = new Map<string, AbortController>();
 
   constructor(
     private readonly ds: DatabaseService,
@@ -58,6 +82,48 @@ export class AutoStartService {
 
   get(jobId: string): AutoStartJob | undefined {
     return this.jobs.get(jobId);
+  }
+
+  /** 用户手动取消启动：停掉已成功启动的服务，循环在检查点尽快收尾（Cancelled）。
+  /** 用户手动取消启动（5 秒硬指标）：立即置终态并广播 + abort 中断当前长操作
+   *  （LLM 修复 / 端口等待 / 探测），并停止已拉起的服务。循环检测到取消后只做兜底清理。 */
+  cancel(jobId: string): { ok: boolean; message: string } {
+    const job = this.jobs.get(jobId);
+    if (!job) return { ok: false, message: '启动任务不存在或已过期' };
+    if (job.status !== 'Running') return { ok: false, message: `任务已结束（${job.status}），无需取消` };
+    job.cancelRequested = true;
+    job.status = 'Cancelled';
+    job.finishedAt = new Date().toISOString();
+    job.report = '用户手动取消启动';
+    this.step(job, 'failed', '启动已被用户手动取消，正在停止已启动的服务…');
+    this.notify.create({
+      type: 'project.autostart.cancelled',
+      title: `项目 ${job.projectName} 启动已取消`,
+      content: '已停止启动流程并清理已启动的服务；可随时重新点「启动」',
+      priority: 3,
+      projectId: job.projectId,
+    });
+    // 中断当前长操作：所有长 await 都监听该信号，LLM 修复/端口等待/探测立即中断
+    this.jobAbort.get(jobId)?.abort();
+    this.jobAbort.delete(jobId);
+    // 立即并行停止：已登记成功的服务 + tracked 中属于本项目但尚未登记的服务（启动竞态窗口），
+    // 不阻塞 cancel 响应（用户点击后接口即刻返回，进程在后台被终止）
+    const targets = new Set<string>(job.startedServiceIds);
+    try {
+      for (const sid of this.runtime.trackedServiceIdsOfProject(job.projectId)) targets.add(sid);
+    } catch { /* 追踪表读取失败不影响取消 */ }
+    const list = [...targets];
+    void Promise.allSettled(list.map((sid) => this.runtime.stopService(sid, true))).then((settled) => {
+      const stopped = settled.filter((r) => r.status === 'fulfilled').length;
+      this.step(job, 'failed', `已停止 ${stopped}/${list.length} 个服务`);
+    });
+    // 保留终态 60s 供前端轮询读到 Cancelled（旧实现立即 delete，前端轮询拿到 404
+    // 后会一直停在「进行中」，体感是「点了停止没反应」），随后回收
+    const reaper = setTimeout(() => {
+      if (this.jobs.get(jobId) === job) this.jobs.delete(jobId);
+    }, 60_000);
+    reaper.unref?.();
+    return { ok: true, message: list.length ? `已取消启动，正在停止 ${list.length} 个服务` : '已取消启动' };
   }
 
   latest(projectId: string): AutoStartJob | undefined {
@@ -87,10 +153,14 @@ export class AutoStartService {
       // Python 类项目常见「每轮只缺一个包」的依赖链，3 轮不够装完，放宽到 6
       maxAttempts: 6,
       steps: [],
+      startedServiceIds: [],
     };
     this.jobs.set(job.id, job);
     this.byProject.set(projectId, job.id);
+    this.jobAbort.set(job.id, new AbortController());
     void this.run(job, project).catch((e) => {
+      // 用户已取消：终态 Cancelled 已广播，异常兜底不覆盖（多为 abort 导致的 LL 中断）
+      if (job.cancelRequested) return;
       job.status = 'Failed';
       job.finishedAt = new Date().toISOString();
       job.report = `自动启动异常：${String(e).slice(0, 300)}`;
@@ -167,99 +237,250 @@ export class AutoStartService {
     const results: string[] = [];
     let allOk = true;
 
-    for (const svc of services) {
-      // 1) 无启动命令的服务先让 Agent 分析
-      let fresh = this.getService(svc.id);
-      if (!fresh?.start_command) {
-        this.step(job, 'detect', `服务 ${svc.name} 没有启动命令，交由 Agent 分析启动方式`);
-        const analysis = await this.fixer.fix({
-          projectId: project.id,
-          rootPath: project.root_path,
-          projectName: project.name,
-          language: project.language ?? 'unknown',
-          isBinary,
-          startCommand: null,
-          port: fresh?.port ?? null,
-          logText: '（尚未启动：没有可用的启动命令）',
-          attempt: 0,
-          mode: 'analyze-start',
-        });
-        this.applyFixOutcome(job, svc.id, analysis);
-        fresh = this.getService(svc.id);
-        if (!fresh?.start_command) {
-          results.push(`✗ ${svc.name}：无法确定启动方式`);
-          allOk = false;
-          continue;
+    // 启动编排（二次启动提速关键）：
+    // - 基础设施（database/cache/mq）串行完整启动（其余服务依赖它们，必须先就绪）；
+    // - 其余服务按依赖顺序快速 spawn——只保证拉起顺序，不互相等待端口/校验，
+    //   验证并行进行，墙钟时间从「各服务耗时之和」变为「最慢的那个」；
+    // - 热启动（同一命令此前健康校验通过）用轻量校验（单次 HTTP 探测），
+    //   跳过 4s 观察窗口与逐模块探测；轻量校验不过自动回落全量校验；
+    // - 任何失败服务随后逐个进入原有「启动 → 修复 → 重试」闭环。
+    const INFR_TYPES = new Set(['database', 'cache', 'mq']);
+    const infraList = services.filter((s) => INFR_TYPES.has(s.service_type));
+    const restList = services.filter((s) => !INFR_TYPES.has(s.service_type));
+
+    for (const svc of infraList) {
+      if (job.cancelRequested) break;
+      const out = await this.startOneServiceWithRepair(job, project, svc, isBinary);
+      results.push(out.ok
+        ? `✓ ${svc.name}：${out.cmd}${out.port ? `（端口 ${out.port}）` : ''}`
+        : `✗ ${svc.name}：启动失败（详见上方日志）`);
+      if (!out.ok) allOk = false;
+    }
+
+    type SpawnTask = {
+      svc: typeof restList[number];
+      port: number | null;
+      attemptStartedAt: string;
+      cmd: string;
+      promise: Promise<{ r: Awaited<ReturnType<RuntimeService['startService']>> | null; err: string | null }>;
+    };
+    const spawns: SpawnTask[] = [];
+    for (const svc of restList) {
+      // 取消检查点：用户手动中止 → 停止拉起后续服务，尽快收尾
+      if (job.cancelRequested) break;
+      const cur = this.getService(svc.id);
+      if (!cur?.start_command) {
+        // 无启动命令（通常是首次启动）：走完整链路（含 Agent 分析），串行处理
+        const out = await this.startOneServiceWithRepair(job, project, svc, isBinary);
+        results.push(out.ok
+          ? `✓ ${svc.name}：${out.cmd}${out.port ? `（端口 ${out.port}）` : ''}`
+          : `✗ ${svc.name}：启动失败（详见上方日志）`);
+        if (!out.ok) allOk = false;
+        continue;
+      }
+      const refined = this.refineStartCommand(project.root_path, cur.start_command);
+      if (refined.changed) {
+        this.applyServiceConfig(svc.id, { start_command: refined.command });
+        this.step(job, 'detect', `[${svc.name}] ${refined.note}`, refined.command);
+      }
+      const cmd = refined.command;
+      this.step(job, 'start', `启动 ${svc.name}（${cur.service_type}）：${cmd}`);
+      const attemptStartedAt = new Date().toISOString();
+      try {
+        await this.runtime.stopService(svc.id, true);
+      } catch { /* 没在跑就忽略 */ }
+      spawns.push({
+        svc,
+        port: this.getService(svc.id)?.port ?? cur.port,
+        attemptStartedAt,
+        cmd,
+        promise: this.runtime.startService(svc.id).then(
+          (r) => ({ r, err: null as string | null }),
+          (e) => ({ r: null, err: String((e as Error)?.message ?? e) }),
+        ),
+      });
+      // spawn 间隔 120ms：保持拉起顺序（先 backend 后 frontend），又不等待前一个就绪
+      await new Promise((r) => setTimeout(r, 120));
+    }
+
+    // 并行收 spawn 结果并做健康校验；失败服务收集后进入修复闭环
+    const failed: typeof restList = [];
+    await Promise.all(spawns.map(async (sp) => {
+      let { r, err: startError } = await sp.promise;
+      // 端口占用自愈：确定性终止占用进程并立即重试一次（不消耗修复次数，不进 LLM）
+      if (startError && await this.tryKillPortOccupier(startError, job, sp.svc.name)) {
+        try { r = await this.runtime.startService(sp.svc.id); startError = null; } catch (e) { r = null; startError = String((e as Error)?.message ?? e); }
+      }
+      if (r?.status === 'Stopped' && !sp.port) {
+        // CLI 工具型服务：一次性命令 exit 0 = 启动校验通过（依赖齐、入口可用）。
+        let terminalNote = '';
+        try {
+          await this.runtime.openTerminal(sp.svc.id);
+          terminalNote = '，已自动打开命令行窗口';
+        } catch (e) {
+          terminalNote = `，命令行窗口打开失败（${String((e as Error)?.message ?? e).slice(0, 80)}），可在详情里点「打开终端」重试`;
         }
+        job.startedServiceIds.push(sp.svc.id);
+        results.push(`✓ ${sp.svc.name}：CLI 启动校验通过（${sp.cmd}，exit 0）${terminalNote}`);
+        this.step(job, 'done', `${sp.svc.name} CLI 启动校验通过${terminalNote}，直接在弹出的窗口里使用本项目`);
+        return;
+      }
+      if (r?.status === 'Running') {
+        const light = this.isWarmStart(sp.svc.id, sp.cmd, sp.port);
+        const verify = await this.verifyRunning(sp.svc.name, sp.port, sp.attemptStartedAt, light);
+        if (verify.ok) {
+          job.startedServiceIds.push(sp.svc.id);
+          results.push(`✓ ${sp.svc.name}：${sp.cmd}${sp.port ? `（端口 ${sp.port}）` : ''}${r.adopted ? '，接管已有实例' : ''}`);
+          this.step(job, 'done', `${sp.svc.name} 启动成功${sp.port ? `，端口 ${sp.port}` : ''}${light ? '（热启动快速校验通过）' : '（健康校验通过）'}`);
+          this.recordWarmStart(sp.svc.id, sp.cmd, sp.port);
+          return;
+        }
+        this.invalidateWarmStart(sp.svc.id);
+        this.step(job, 'verify', `${sp.svc.name} 端口已监听，但健康校验未通过（服务实际不可用），判定为本次启动失败`, verify.detail.slice(0, 800));
+        failed.push(sp.svc);
+        return;
+      }
+      this.invalidateWarmStart(sp.svc.id);
+      this.step(job, 'repair', `${sp.svc.name} 启动失败（${startError ? `异常：${startError}` : r?.status ?? '未知状态'}），交给 Agent 修复`);
+      failed.push(sp.svc);
+    }));
+
+    // 失败的服务逐个进入「启动 → 修复 → 重试」闭环（热启动通常为空）
+    for (const svc of failed) {
+      if (job.cancelRequested) break;
+      const out = await this.startOneServiceWithRepair(job, project, svc, isBinary);
+      results.push(out.ok
+        ? `✓ ${svc.name}：修复后启动成功：${out.cmd}${out.port ? `（端口 ${out.port}）` : ''}`
+        : `✗ ${svc.name}：启动失败（详见上方日志）`);
+      if (!out.ok) allOk = false;
+    }
+
+    // 取消语义优先：无论循环走到哪一步，用户取消即终态 Cancelled
+    if (job.cancelRequested) {
+      // cancel() 已经置过终态并弹过通知（finishedAt 有值）→ 这里只补流程明细，不重复通知用户
+      const alreadyFinal = !!job.finishedAt;
+      job.status = 'Cancelled';
+      job.finishedAt = job.finishedAt ?? new Date().toISOString();
+      // 兜底统一停止：cancel() 与启动完成存在竞态窗口（cancel 快照后又有服务启动成功），
+      // 这里对全部已启动服务再停一遍（stopService 幂等，并行以免逐个等待拖慢收尾）
+      const settled = await Promise.allSettled(job.startedServiceIds.map((sid) => this.runtime.stopService(sid, true)));
+      const stopped = settled.filter((r) => r.status === 'fulfilled').length;
+      results.push(`✗ 用户手动取消启动（已停止 ${stopped} 个服务）`);
+      job.report = results.join('\n');
+      this.step(job, 'failed', '启动已被用户手动取消');
+      if (!alreadyFinal) {
+        this.notify.create({ type: 'project.autostart.cancelled', title: `项目 ${project.name} 启动已取消`, content: `已停止 ${stopped} 个服务；可随时重新点「启动」`, priority: 3 });
+      }
+      return;
+    }
+    job.status = allOk ? 'Success' : 'Failed';
+    job.finishedAt = new Date().toISOString();
+    // 用户入口默认取最后一个前端服务的端口（没有前端则取第一个有端口的服务）
+    const front = [...services].reverse().find((s) => s.service_type === 'frontend' && s.port);
+    const anyPort = services.find((s) => s.port);
+    job.port = (front ?? anyPort)?.port ?? null;
+    job.report = results.join('\n');
+    this.step(job, allOk ? 'done' : 'failed', allOk ? `全部 ${services.length} 个服务已启动` : '部分服务启动失败', job.report);
+    this.notify.create({
+      type: allOk ? 'project.autostart.ok' : 'project.autostart.failed',
+      title: allOk ? `项目 ${project.name} 已启动（${services.length} 个服务）` : `项目 ${project.name} 部分服务启动失败`,
+      content: job.report.slice(0, 800),
+      priority: allOk ? 4 : 2,
+      projectId: project.id,
+    });
+  }
+
+  /** 单个服务完整启动链路：无命令先让 Agent 分析 → 启动 → 失败修复 → 重试。并行编排与基础设施串行共用 */
+  private async startOneServiceWithRepair(
+    job: AutoStartJob,
+    project: { id: string; name: string; root_path: string; language: string | null },
+    svc: { id: string; name: string; service_type: string; start_command: string | null; port: number | null; workdir: string },
+    isBinary: boolean,
+  ): Promise<{ ok: boolean; cmd: string; port: number | null }> {
+    // 1) 无启动命令的服务先让 Agent 分析
+    let fresh = this.getService(svc.id);
+    if (!fresh?.start_command) {
+      this.step(job, 'detect', `服务 ${svc.name} 没有启动命令，交由 Agent 分析启动方式`);
+      const analysis = await this.fixer.fix({
+        projectId: project.id,
+        rootPath: project.root_path,
+        projectName: project.name,
+        language: project.language ?? 'unknown',
+        isBinary,
+        startCommand: null,
+        port: fresh?.port ?? null,
+        logText: '（尚未启动：没有可用的启动命令）',
+        attempt: 0,
+        mode: 'analyze-start',
+      });
+      this.applyFixOutcome(job, svc.id, analysis);
+      fresh = this.getService(svc.id);
+      if (!fresh?.start_command) {
+        this.step(job, 'failed', `${svc.name}：无法确定启动方式`);
+        return { ok: false, cmd: '', port: fresh?.port ?? null };
+      }
+    }
+
+    // 2) 启动 → 失败修复 → 重试
+    let lastCmd = '';
+    for (let attempt = 1; attempt <= job.maxAttempts; attempt++) {
+      if (job.cancelRequested) break;
+      job.attempt = attempt;
+      const cur = this.getService(svc.id)!;
+      const refined = this.refineStartCommand(project.root_path, cur.start_command);
+      if (refined.changed) {
+        this.applyServiceConfig(svc.id, { start_command: refined.command });
+        this.step(job, 'detect', `[${svc.name}] ${refined.note}`, refined.command);
+      }
+      const cmd = refined.command;
+      lastCmd = cmd;
+      this.step(job, attempt === 1 ? 'start' : 'retry', `启动 ${svc.name}（${cur.service_type}）：${cmd}`);
+      const attemptStartedAt = new Date().toISOString();
+      try {
+        await this.runtime.stopService(svc.id, true);
+      } catch { /* 没在跑就忽略 */ }
+
+      let r: Awaited<ReturnType<RuntimeService['startService']>> | null = null;
+      let startError: string | null = null;
+      let verifyFailed = false;
+      try {
+        r = await this.runtime.startService(svc.id);
+      } catch (e) {
+        startError = String((e as Error)?.message ?? e);
+      }
+      // 端口占用自愈：确定性终止占用进程并立即重试一次（不消耗修复次数，不进 LLM）
+      if (startError && await this.tryKillPortOccupier(startError, job, svc.name)) {
+        try { r = await this.runtime.startService(svc.id); startError = null; } catch (e) { startError = String((e as Error)?.message ?? e); r = null; }
       }
 
-      // 2) 启动 → 失败修复 → 重试
-      let ok = false;
-      let lastLog = '';
-      for (let attempt = 1; attempt <= job.maxAttempts; attempt++) {
-        job.attempt = attempt;
-        const cur = this.getService(svc.id)!;
-        const refined = this.refineStartCommand(project.root_path, cur.start_command);
-        if (refined.changed) {
-          this.applyServiceConfig(svc.id, { start_command: refined.command });
-          this.step(job, 'detect', `[${svc.name}] ${refined.note}`, refined.command);
-        }
-        const cmd = refined.command;
-        this.step(job, attempt === 1 ? 'start' : 'retry', `启动 ${svc.name}（${cur.service_type}）：${cmd}`);
-        const attemptStartedAt = new Date().toISOString();
+      if (r?.status === 'Stopped' && !cur.port) {
+        // CLI 工具型服务：一次性命令 exit 0 = 启动校验通过（依赖齐、入口可用）。
+        let terminalNote = '';
         try {
-          await this.runtime.stopService(svc.id, true);
-        } catch { /* 没在跑就忽略 */ }
-
-        let r: Awaited<ReturnType<RuntimeService['startService']>> | null = null;
-        let startError: string | null = null;
-        let verifyFailed = false;
-        try {
-          r = await this.runtime.startService(svc.id);
+          await this.runtime.openTerminal(svc.id);
+          terminalNote = '，已自动打开命令行窗口';
         } catch (e) {
-          // startService 抛异常（如端口被系统保留）不应中止整个任务，进入修复流程
-          startError = String((e as Error)?.message ?? e);
+          terminalNote = `，命令行窗口打开失败（${String((e as Error)?.message ?? e).slice(0, 80)}），可在详情里点「打开终端」重试`;
         }
+        job.startedServiceIds.push(svc.id);
+        this.step(job, 'done', `${svc.name} CLI 启动校验通过（${cmd}，exit 0）${terminalNote}`);
+        return { ok: true, cmd, port: cur.port };
+      }
 
-        if (r?.status === 'Stopped' && !cur.port) {
-          // CLI 工具型服务：一次性命令 exit 0 = 启动校验通过（依赖齐、入口可用）。
-          // 校验通过立即为用户打开可用的命令行窗口——CLI 项目的"启动成功"就是能直接用。
-          let terminalNote = '';
-          try {
-            await this.runtime.openTerminal(svc.id);
-            terminalNote = '，已自动打开命令行窗口';
-          } catch (e) {
-            terminalNote = `，命令行窗口打开失败（${String((e as Error)?.message ?? e).slice(0, 80)}），可在详情里点「打开终端」重试`;
-          }
-          ok = true;
-          results.push(`✓ ${svc.name}：CLI 启动校验通过（${cmd}，exit 0）${terminalNote}`);
-          this.step(job, 'done', `${svc.name} CLI 启动校验通过${terminalNote}，直接在弹出的窗口里使用本项目`);
-          break;
+      if (r?.status === 'Running') {
+        const light = this.isWarmStart(svc.id, cmd, cur.port);
+        const verify = await this.verifyRunning(svc.name, cur.port, attemptStartedAt, light);
+        if (verify.ok) {
+          job.startedServiceIds.push(svc.id);
+          this.step(job, 'done', `${svc.name} 启动成功${cur.port ? `，端口 ${cur.port}` : ''}${light ? '（热启动快速校验通过）' : '（健康校验通过）'}`);
+          this.recordWarmStart(svc.id, cmd, cur.port);
+          return { ok: true, cmd, port: cur.port };
         }
-
-        if (r?.status === 'Running') {
-          // 端口监听 ≠ 启动成功：做真实健康校验（页面模块能否编译、有无报错日志）。
-          // vite「Failed to resolve import」这类错误曾经被误报成启动成功。
-          const verify = await this.verifyRunning(svc.name, cur.port, attemptStartedAt);
-          if (verify.ok) {
-            ok = true;
-            results.push(`✓ ${svc.name}：${cmd}${cur.port ? `（端口 ${cur.port}）` : ''}${r.adopted ? '，接管已有实例' : ''}`);
-            this.step(job, 'done', `${svc.name} 启动成功${cur.port ? `，端口 ${cur.port}（健康校验通过）` : '（健康校验通过）'}`);
-            break;
-          }
-          verifyFailed = true;
-          lastLog = verify.detail;
-          this.step(job, 'verify', `${svc.name} 端口已监听，但健康校验未通过（服务实际不可用），判定为本次启动失败`, verify.detail.slice(0, 800));
-        }
-
-        if (!verifyFailed) {
-          lastLog = startError ?? this.collectLogs(svc.name, r!.status, attemptStartedAt);
-          this.step(job, 'repair', `${svc.name} 第 ${attempt} 次启动失败（${startError ? `异常：${startError}` : r!.status}），交给 Agent 修复`, lastLog.slice(0, 600));
-        } else {
-          this.step(job, 'repair', `${svc.name} 第 ${attempt} 次启动失败（健康校验未通过），交给 Agent 修复`, lastLog.slice(0, 600));
-        }
+        this.invalidateWarmStart(svc.id);
+        verifyFailed = true;
+        const lastLog = verify.detail;
+        this.step(job, 'verify', `${svc.name} 端口已监听，但健康校验未通过（服务实际不可用），判定为本次启动失败`, verify.detail.slice(0, 800));
         if (attempt === job.maxAttempts) break;
-
         const fix = await this.fixer.fix({
           projectId: project.id,
           rootPath: project.root_path,
@@ -277,28 +498,36 @@ export class AutoStartService {
           this.step(job, 'repair', `Agent 判断 ${svc.name} 无法自动修复：${fix.analysis || '（无说明）'}`);
           break;
         }
+        continue;
       }
-      if (!ok) {
-        results.push(`✗ ${svc.name}：启动失败（详见上方日志）`);
-        allOk = false;
+
+      const lastLog = startError ?? this.collectLogs(svc.name, r!.status, attemptStartedAt);
+      this.step(job, 'repair', `${svc.name} 第 ${attempt} 次启动失败（${startError ? `异常：${startError}` : r!.status}），交给 Agent 修复`, lastLog.slice(0, 600));
+      if (attempt === job.maxAttempts) break;
+      const obvious = AutoStartService.diagnoseObviousFailure(lastLog, cmd);
+      if (obvious) {
+        this.step(job, 'repair', `${svc.name}：${obvious}`);
+        break;
+      }
+      const fix = await this.fixer.fix({
+        projectId: project.id,
+        rootPath: project.root_path,
+        projectName: project.name,
+        language: project.language ?? 'unknown',
+        isBinary,
+        startCommand: cmd,
+        port: cur.port,
+        logText: lastLog,
+        attempt,
+        mode: 'repair',
+      });
+      this.applyFixOutcome(job, svc.id, fix);
+      if (!fix.changed) {
+        this.step(job, 'repair', `Agent 判断 ${svc.name} 无法自动修复：${fix.analysis || '（无说明）'}`);
+        break;
       }
     }
-
-    job.status = allOk ? 'Success' : 'Failed';
-    job.finishedAt = new Date().toISOString();
-    // 用户入口默认取最后一个前端服务的端口（没有前端则取第一个有端口的服务）
-    const front = [...services].reverse().find((s) => s.service_type === 'frontend' && s.port);
-    const anyPort = services.find((s) => s.port);
-    job.port = (front ?? anyPort)?.port ?? null;
-    job.report = results.join('\n');
-    this.step(job, allOk ? 'done' : 'failed', allOk ? `全部 ${services.length} 个服务已启动` : '部分服务启动失败', job.report);
-    this.notify.create({
-      type: allOk ? 'project.autostart.ok' : 'project.autostart.failed',
-      title: allOk ? `项目 ${project.name} 已启动（${services.length} 个服务）` : `项目 ${project.name} 部分服务启动失败`,
-      content: job.report.slice(0, 800),
-      priority: allOk ? 4 : 2,
-      projectId: project.id,
-    });
+    return { ok: false, cmd: lastCmd, port: this.getService(svc.id)?.port ?? null };
   }
 
   /** 单服务：保持原有「一键脚本优先 → 启动 → 修复 → 重试」闭环 */
@@ -366,6 +595,7 @@ export class AutoStartService {
 
     // 3) 启动 → 失败 → 修复 → 重试
     for (let attempt = 1; attempt <= job.maxAttempts; attempt++) {
+      if (job.cancelRequested) break;
       job.attempt = attempt;
       const cur = this.getService(svc.id);
       if (!cur?.start_command) break;
@@ -388,6 +618,10 @@ export class AutoStartService {
       } catch (e) {
         startError = String((e as Error)?.message ?? e);
       }
+      // 端口占用自愈：确定性终止占用进程并立即重试一次（不消耗修复次数，不进 LLM）
+      if (startError && await this.tryKillPortOccupier(startError, job, svc.name)) {
+        try { r = await this.runtime.startService(svc.id); startError = null; } catch (e) { startError = String((e as Error)?.message ?? e); r = null; }
+      }
       const cliDone = r?.status === 'Stopped' && !cur.port;
       if (cliDone) {
         // CLI 工具型项目：一次性命令 exit 0 = 启动校验通过（依赖装齐 + 入口可用）。
@@ -402,6 +636,7 @@ export class AutoStartService {
         job.status = 'Success';
         job.finishedAt = new Date().toISOString();
         job.pid = r!.pid;
+        job.startedServiceIds.push(svc.id);
         job.report = `CLI 项目启动校验通过：${cur.start_command} 执行成功（exit 0）。${terminalNote}`;
         this.step(job, 'done', job.report);
         this.notify.create({
@@ -416,12 +651,15 @@ export class AutoStartService {
       if (r?.status === 'Running') {
         // 端口监听 ≠ 启动成功：真实健康校验。vite dev server 端口起来但模块编译
         // 失败（如缺 @tauri-apps/api）时，页面访问是报错页，必须判失败进修复循环。
-        const verify = await this.verifyRunning(svc.name, cur.port, attemptStartedAt);
+        const light = this.isWarmStart(svc.id, cur.start_command, cur.port);
+        const verify = await this.verifyRunning(svc.name, cur.port, attemptStartedAt, light);
         if (verify.ok) {
+          this.recordWarmStart(svc.id, cur.start_command, cur.port);
           job.status = 'Success';
           job.finishedAt = new Date().toISOString();
           job.pid = r.pid;
-          job.report = `启动成功（健康校验通过）${r.adopted ? '（接管已在运行的实例）' : ''}：${cur.start_command}${cur.port ? `，端口 ${cur.port}` : ''}`;
+          job.startedServiceIds.push(svc.id);
+          job.report = `启动成功（${light ? '热启动快速校验通过' : '健康校验通过'}）${r.adopted ? '（接管已在运行的实例）' : ''}：${cur.start_command}${cur.port ? `，端口 ${cur.port}` : ''}`;
           this.step(job, 'done', job.report);
           this.notify.create({
             type: 'project.autostart.ok',
@@ -432,6 +670,7 @@ export class AutoStartService {
           });
           return;
         }
+        this.invalidateWarmStart(svc.id);
         verifyFailed = true;
         verifyDetail = verify.detail;
       }
@@ -449,6 +688,17 @@ export class AutoStartService {
         job.report = `连续 ${job.maxAttempts} 次启动失败。最后一次状态 ${startError ?? r!.status}。\n\n最近日志：\n${logText.slice(-1200)}`;
         this.step(job, 'failed', job.report);
         this.notify.create({ type: 'project.autostart.failed', title: `项目 ${project.name} 自动修复后仍未启动`, content: job.report.slice(0, 800), priority: 2, projectId: project.id });
+        return;
+      }
+
+      // 确定性诊断优先：命中已知失败模式就不烧 LLM，也避免「all providers failed」盖住真因
+      const obvious = AutoStartService.diagnoseObviousFailure(logText, cur.start_command);
+      if (obvious) {
+        job.status = 'Failed';
+        job.finishedAt = new Date().toISOString();
+        job.report = `${obvious}\n\n最近日志：\n${logText.slice(-1200)}`;
+        this.step(job, 'failed', obvious);
+        this.notify.create({ type: 'project.autostart.failed', title: `项目 ${project.name} 启动失败`, content: job.report.slice(0, 800), priority: 2, projectId: project.id });
         return;
       }
 
@@ -477,6 +727,21 @@ export class AutoStartService {
     }
 
     if (job.status === 'Running') {
+      // 取消语义优先：用户手动取消 → 终态 Cancelled（含竞态兜底：统一停全部已启动服务）
+      if (job.cancelRequested) {
+        // cancel() 已置终态并通知过（表现为 finishedAt 已有值）→ 不重复弹通知
+        const alreadyFinal = !!job.finishedAt;
+        job.status = 'Cancelled';
+        job.finishedAt = job.finishedAt ?? new Date().toISOString();
+        const settled = await Promise.allSettled(job.startedServiceIds.map((sid) => this.runtime.stopService(sid, true)));
+        const stopped = settled.filter((r) => r.status === 'fulfilled').length;
+        job.report = `用户手动取消启动（已停止 ${stopped} 个服务）；可随时重新点「启动」`;
+        this.step(job, 'failed', '启动已被用户手动取消');
+        if (!alreadyFinal) {
+          this.notify.create({ type: 'project.autostart.cancelled', title: `项目 ${project.name} 启动已取消`, content: job.report, priority: 3, projectId: project.id });
+        }
+        return;
+      }
       job.status = 'Failed';
       job.finishedAt = new Date().toISOString();
       job.report = job.report ?? '自动启动未完成（启动命令缺失或全部尝试失败）';
@@ -494,9 +759,45 @@ export class AutoStartService {
    * 任一手段发现真实错误 → 判定启动失败，进入修复循环。
    * 校验只在"发现明确错误"时判失败：应用能正常服务却打了一些无害 error 日志不会被误杀。
    */
-  private async verifyRunning(serviceName: string, port: number | null, sinceIso: string): Promise<{ ok: boolean; detail: string }> {
-    // 留出窗口期：让 dev server 完成 warmup / 让应用写出启动期错误日志
-    await new Promise((r) => setTimeout(r, 4000));
+  private async verifyRunning(serviceName: string, port: number | null, sinceIso: string, light = false): Promise<{ ok: boolean; detail: string }> {
+    // 热启动快速校验：该服务此前用同一命令 + 端口通过过全量健康校验，这次只做一次
+    // 轻量 HTTP 探测（2.5s 超时，<400 即通过），跳过观察窗口与逐模块探测。
+    // 探测不通过时不判死，自动回落到下方全量校验。
+    if (light && port) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2500), headers: { 'User-Agent': 'DevPilot-probe' } });
+        if (res.status < 400) {
+          void res.body?.cancel();
+          this.logs.log({ level: 'info', sourceModule: 'autostart', projectId: '', message: `${serviceName} 热启动快速校验通过（跳过全量探测）` });
+          return { ok: true, detail: '' };
+        }
+        void res.body?.cancel();
+      } catch { /* 探测失败 → 回落全量校验 */ }
+    }
+    if (light && !port) return { ok: true, detail: '' }; // 无端口服务：startService 的常驻窗口已确认存活
+    // 自适应窗口期（最多 4s）：HTTP 就绪（能拿到响应）即提前进入校验，
+    // 不再无条件睡满 4 秒——正常快速启动的服务这里能省下大半等待。
+    const WINDOW_MS = 4000;
+    const windowStart = Date.now();
+    if (port) {
+      let ready = false;
+      while (Date.now() - windowStart < WINDOW_MS) {
+        try {
+          const probe = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1200), headers: { 'User-Agent': 'DevPilot-probe' } });
+          // 拿到任何 HTTP 响应（含 4xx/5xx，5xx 也是真实信号）即视为窗口期足够
+          ready = true;
+          void probe;
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      }
+      if (!ready) this.logs.log({ level: 'warn', sourceModule: 'autostart', projectId: '', message: `${serviceName} 窗口期 ${WINDOW_MS}ms 内 HTTP 未就绪，按超时进入校验` });
+    } else {
+      // 无端口服务：只留一小段窗口让应用写出启动期错误日志（审计 P-03：1500ms → 400ms，
+      // startService 的常驻判定已经确认过进程没退出，这里再等 1.5s 没有额外信息量）
+      await new Promise((r) => setTimeout(r, 400));
+    }
 
     const problems: string[] = [];
 
@@ -531,7 +832,25 @@ export class AutoStartService {
         signal: AbortSignal.timeout(5000),
         headers: { 'User-Agent': 'DevPilot-probe', Accept: 'text/html' },
       });
-      if (res.status >= 500) return `GET / 返回 HTTP ${res.status}，服务端异常`;
+      // 5xx 不等于"启动失败"：SSR 前端（React Router / Next）在后端 API 还没起来时会先返回 5xx，
+      // 多服务并行启动时必然出现这个窗口。这里给 25s 容忍窗口，只有持续 5xx 才判失败。
+      if (res.status >= 500) {
+        let last = res.status;
+        for (let i = 0; i < 25; i++) {
+          await new Promise((r) => setTimeout(r, 1000));
+          try {
+            const retry = await fetch(`${base}/`, {
+              signal: AbortSignal.timeout(5000),
+              headers: { 'User-Agent': 'DevPilot-probe', Accept: 'text/html' },
+            });
+            if (retry.status < 500) break;
+            last = retry.status;
+          } catch { /* 网络抖动继续重试 */ }
+          if (i === 24) return `GET / 持续返回 HTTP ${last}（等待 25s 后仍未恢复），服务端异常`;
+        }
+        this.logs.log({ level: 'info', sourceModule: 'autostart', projectId: '', message: `端口 ${port} 启动初期返回 5xx，等待后端依赖就绪后已恢复` });
+        return null;
+      }
       const ct = res.headers.get('content-type') ?? '';
       if (!ct.includes('text/html')) return null; // 非 HTML 服务（API 等）不做模块探测
       html = await res.text();
@@ -540,19 +859,21 @@ export class AutoStartService {
     }
 
     const srcs = [...html.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]).slice(0, 8);
-    for (const src of srcs) {
+    // 并行探测全部入口模块：串行 8 个最坏 64s，并行最坏 8s
+    const results = await Promise.all(srcs.map(async (src) => {
       let u: URL;
-      try { u = new URL(src, base); } catch { continue; }
-      if (u.origin !== base) continue; // 跳过 CDN / 外部脚本
+      try { u = new URL(src, base); } catch { return null; }
+      if (u.origin !== base) return null; // 跳过 CDN / 外部脚本
       try {
         const r2 = await fetch(u, { signal: AbortSignal.timeout(8000), headers: { 'User-Agent': 'DevPilot-probe' } });
         if (r2.status >= 500) {
           const body = (await r2.text()).slice(0, 600);
           return `入口模块 ${src} 返回 HTTP ${r2.status}（依赖缺失或编译错误）：\n${body}`;
         }
-      } catch { /* 单个模块请求失败不判死，以下一个为准 */ }
-    }
-    return null;
+      } catch { /* 单个模块请求失败不判死 */ }
+      return null;
+    }));
+    return results.find((x) => x !== null) ?? null;
   }
 
   /**
@@ -623,6 +944,27 @@ export class AutoStartService {
   }
 
   private applyFixOutcome(job: AutoStartJob, serviceId: string, fix: FixOutcome) {
+    // 启动命令合理性把关：宁可不修，也不把「python -m http.server」这种兜底命令写进
+    // 数据库/前端服务（实测会把项目"修"成目录列表页）。
+    const svcRow = this.ds.db
+      .prepare('SELECT name, service_type, start_command, workdir FROM project_services WHERE id = ?')
+      .get(serviceId) as { name: string; service_type: string; start_command: string | null; workdir: string } | undefined;
+    if (svcRow && fix.startCommand) {
+      const verdict = judgeFix({
+        serviceName: svcRow.name,
+        serviceType: svcRow.service_type,
+        projectRoot: this.projectRootOf(job.projectId) ?? svcRow.workdir ?? '',
+        workdir: svcRow.workdir || undefined,
+        previousCommand: svcRow.start_command,
+        proposedCommand: fix.startCommand,
+      });
+      if (!verdict.ok) {
+        this.step(job, 'repair', `拒绝应用 Agent 给出的启动命令：${verdict.reason}${verdict.hint ? `\n建议：${verdict.hint}` : ''}`, fix.startCommand);
+        fix.startCommand = null;
+        fix.port = null;
+        fix.changed = false;
+      }
+    }
     if (fix.ranCommands.length) {
       const lines = fix.ranCommands.map((c) => `${c.skipped ? '跳过' : `exit=${c.exitCode ?? 'err'}`}  ${c.command}${c.output ? `\n    ${c.output.split('\n').slice(-3).join('\n    ')}` : ''}`);
       this.step(job, 'repair', `执行 ${fix.ranCommands.length} 条修复命令`, lines.join('\n'));
@@ -641,8 +983,104 @@ export class AutoStartService {
     }
   }
 
-  private collectLogs(serviceName: string, status: string, sinceIso?: string): string {
-    const svcLogRaw = (() => {
+  /** 系统关键进程（自愈终止白名单外一律拒绝） */
+  private static readonly PROTECTED_PROCESS_NAMES = /^(system|smss|csrss|wininit|winlogon|services|lsass|svchost|dwm|explorer|registry|memory compression|fontdrvhost|audiodg)$/i;
+
+  /**
+   * 端口占用自愈（确定性，不进 LLM 修复，不消耗修复次数）：
+   * 启动失败错误形态「端口 X 已被 PID N（name）占用且不响应 HTTP」→ 直接终止占用进程。
+   * 护栏：系统关键进程 / DevPilot 自身 / 本机其它受管服务 不杀，转交 Agent 修复或人工处理。
+   * 返回 true = 已终止且确认死亡（调用方立即重试启动）。
+   */
+  private async tryKillPortOccupier(startError: string | null, job: AutoStartJob, svcName: string): Promise<boolean> {
+    if (!startError) return false;
+    const m = /端口 (\d+) 已被 PID (\d+)（([^）]+)）\s*占用/i.exec(startError);
+    if (!m) return false;
+    const port = m[1];
+    const pid = Number(m[2]);
+    const name = m[3];
+    if (!Number.isInteger(pid) || pid <= 4) {
+      this.step(job, 'repair', `端口 ${port} 占用进程 PID ${pid} 是内核级进程，不自动终止（可改用其它端口）`);
+      return false;
+    }
+    if (pid === process.pid) {
+      this.step(job, 'repair', `端口 ${port} 占用进程是 DevPilot 自身，拒绝终止`);
+      return false;
+    }
+    if (AutoStartService.PROTECTED_PROCESS_NAMES.test(name.replace(/\.exe$/i, ''))) {
+      this.step(job, 'repair', `端口 ${port} 占用进程 ${name} 是系统关键进程，不自动终止（可改用其它端口）`);
+      return false;
+    }
+    const owner = this.runtime.getTrackedServiceByPid(pid);
+    if (owner) {
+      this.step(job, 'repair', `端口 ${port} 占用进程 PID ${pid} 属于本机受管服务「${owner}」，不自动终止；请先在运行中心停止该服务，或改用其它端口`);
+      return false;
+    }
+    // 审计 S-03 修复：只终止「本项目自己的遗留进程」，其余一律交还用户决定。
+    // 旧实现会把任意占端口的进程直接 taskkill /F —— 实测曾把用户正在跑的 Vite 杀掉。
+    const owned = process.env.DEVIPILOT_TRUST_EXTERNAL_PORTS === '1'
+      ? true
+      : await this.runtime.pidBelongsToProject(pid, job.projectId);
+    if (!owned) {
+      this.step(
+        job,
+        'repair',
+        `端口 ${port} 被外部进程 PID ${pid}（${name}）占用，且不属于本项目 —— DevPilot 不会自动终止外部进程；` +
+        `请先手动结束它，或为该服务改用其它端口后重试`,
+      );
+      return false;
+    }
+    const { platform } = await import('@devpilot/platform-adapters');
+    try {
+      // 2s 上限：taskkill /T /F 正常 100~300ms 返回，旧默认 10s 会让启动/取消在这条路径上长时间空等
+      await platform.killTreeWait(pid, 2000);
+    } catch (e) {
+      this.step(job, 'repair', `终止占用进程 PID ${pid} 失败：${String((e as Error)?.message ?? e).slice(0, 120)}，转 Agent 修复`);
+      return false;
+    }
+    if (platform.pidAlive(pid)) {
+      this.step(job, 'repair', `占用进程 PID ${pid} 终止后仍存活（可能有守护重启），转 Agent 修复`);
+      return false;
+    }
+    this.step(job, 'repair', `端口占用自愈：端口 ${port} 被进程 PID ${pid}（${name}）占用，已直接终止该进程，重试启动`);
+    this.logs.log({ level: 'warn', sourceModule: 'autostart', message: `端口占用自愈：终止 PID ${pid}（${name}）以释放端口 ${port}（服务 ${svcName}）` });
+    return true;
+  }
+
+  /**
+   * 确定性失败诊断（审计 F-02）：在把日志丢给 LLM 之前，先识别几类「一看就知道」的根因。
+   * 命中即直接给结论，不再调用模型——本机没配 Key 时，旧实现会把
+   * `all providers failed` 当成结论抛给用户，真实原因（命令不存在）反而看不到。
+   */
+  static diagnoseObviousFailure(logText: string, startCommand: string | null): string | null {
+    const text = String(logText ?? '');
+    const lower = text.toLowerCase();
+    const firstToken = String(startCommand ?? '').trim().replace(/^["']/, '').split(/\s+/)[0] ?? '';
+    if (
+      /not recognized as an internal or external command/.test(lower) ||
+      /is not recognized as the name of a cmdlet/.test(lower) ||
+      /command not found/.test(lower) ||
+      /\benoent\b/.test(lower)
+    ) {
+      return `启动命令无法执行：系统里找不到「${firstToken || '该命令'}」。请确认它已安装并加入 PATH，或在服务配置里改成正确的启动命令。`;
+    }
+    if (/端口 \d+ 已被外部进程/.test(text)) {
+      return '端口冲突：目标端口被不属于本项目的外部进程占用。请先结束该进程，或在服务配置里换一个端口（DevPilot 不会终止外部进程）。';
+    }
+    if (/eaddrinuse|address already in use/.test(lower)) {
+      return '端口已被占用（EADDRINUSE）。请先结束占用该端口的进程，或为该服务换一个端口。';
+    }
+    if (/cannot find module|module not found/.test(lower)) {
+      const m = /cannot find module ['"]([^'"]+)['"]/i.exec(text) ?? /module not found[^\n]*?['"]([^'"]+)['"]/i.exec(text);
+      return `缺少依赖模块「${m?.[1] ?? '未知'}」。先安装依赖（npm/pnpm install）后重试。`;
+    }
+    if (/permission denied|eacces|eperm/.test(lower)) {
+      return '权限不足（EACCES/EPERM）。请检查文件/目录权限，或以有权限的账号运行。';
+    }
+    return null;
+  }
+
+  private collectLogs(serviceName: string, status: string, sinceIso?: string): string {    const svcLogRaw = (() => {
       try {
         return this.logs.tail(`service.${serviceName}`, 200);
       } catch {
@@ -677,6 +1115,12 @@ export class AutoStartService {
       .all(projectId) as Array<{ id: string; name: string; service_type: string; start_command: string | null; port: number | null; workdir: string; created_at: string }>;
     const rank = (t: string) => (t === 'database' || t === 'cache' || t === 'mq' ? 0 : t === 'backend' ? 1 : t === 'frontend' ? 3 : 2);
     return rows.sort((a, b) => rank(a.service_type) - rank(b.service_type));
+  }
+
+  /** 项目根目录（供修复守卫判断"项目里是否存在真实应用入口"） */
+  private projectRootOf(projectId: string): string | null {
+    const row = this.ds.db.prepare('SELECT root_path FROM projects WHERE id = ?').get(projectId) as { root_path: string } | undefined;
+    return row?.root_path ?? null;
   }
 
   private getService(serviceId: string): { id: string; name: string; service_type: string; start_command: string | null; port: number | null; workdir: string } | null {

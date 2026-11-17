@@ -1,13 +1,13 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import net from 'node:net';
 import fs from 'node:fs';
 import { execFile, spawn, ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { DatabaseService } from '../database/database.module';
+import { tcpProbe } from '../net-probe';
 import { AuditService } from '../permissions/audit.service';
 import { LogService } from '../logs/log.service';
-import { platform as plat } from '@devpilot/platform-adapters';
+import { platform as plat, cleanServiceEnv } from '@devpilot/platform-adapters';
 
 const exec = promisify(execFile);
 
@@ -19,17 +19,6 @@ const COMMON_LOCAL_SERVICES = [
   { kind: 'mongo', name: 'MongoDB', port: 27017, winServiceNames: ['MongoDB', 'mongodb', 'MongoDB Server'] },
   { kind: 'mssql', name: 'SQL Server', port: 1433, winServiceNames: ['MSSQLSERVER', 'MSSQL$SQLEXPRESS'] },
 ];
-
-function tcpProbe(port: number, host = '127.0.0.1', timeout = 1500): Promise<boolean> {
-  return new Promise((resolve) => {
-    const sock = net.createConnection({ port, host });
-    const done = (ok: boolean) => { sock.destroy(); resolve(ok); };
-    sock.setTimeout(timeout);
-    sock.once('connect', () => done(true));
-    sock.once('timeout', () => done(false));
-    sock.once('error', () => done(false));
-  });
-}
 
 /**
  * 数据库连接与本地服务管理：
@@ -104,7 +93,7 @@ export class DatabasesService {
     } else {
       const port = c.port ?? ({ mysql: 3306, postgres: 5432, redis: 6379, mongo: 27017, mssql: 1433 } as Record<string, number>)[c.db_type];
       if (!port) return { ok: false, detail: '未知 db_type，无法确定端口' };
-      ok = await tcpProbe(port, c.host ?? '127.0.0.1');
+      ok = await tcpProbe(c.host ?? '127.0.0.1', port);
       detail = ok ? `TCP ${c.host ?? '127.0.0.1'}:${port} 可达` : `TCP ${c.host ?? '127.0.0.1'}:${port} 连接失败`;
     }
     this.ds.db.prepare('UPDATE database_connections SET status = ? WHERE id = ?').run(ok ? 'connected' : 'unreachable', id);
@@ -117,7 +106,7 @@ export class DatabasesService {
   async detectLocalServices() {
     const results: Array<{ kind: string; name: string; port: number; portOpen: boolean; winService?: string | null; winServiceRunning?: boolean }> = [];
     for (const def of COMMON_LOCAL_SERVICES) {
-      const portOpen = await tcpProbe(def.port);
+      const portOpen = await tcpProbe('127.0.0.1', def.port);
       let winService: string | null = null;
       let winServiceRunning = false;
       // net start 仅列运行中服务；未在列表 = 未运行
@@ -183,7 +172,7 @@ export class DatabasesService {
     if (!s) throw new NotFoundException(`本地服务不存在：${id}`);
     if (this.tracked.has(id)) return { ok: true, pid: this.tracked.get(id)!.child.pid };
     const args = s.args_json ? (JSON.parse(s.args_json) as string[]) : [];
-    const env = s.env_json ? { ...process.env, ...(JSON.parse(s.env_json) as Record<string, string>) } : process.env;
+    const env = cleanServiceEnv(process.env, s.env_json ? (JSON.parse(s.env_json) as Record<string, string>) : null);
     let child: ChildProcess;
     try {
       child = spawn(s.exe_path, args, { cwd: s.workdir ?? undefined, env, windowsHide: true, stdio: 'ignore' });
@@ -228,12 +217,12 @@ export class DatabasesService {
     const s = this.ds.db.prepare('SELECT port FROM local_services WHERE id = ?').get(id) as { port: number | null } | undefined;
     if (!s) throw new NotFoundException(`本地服务不存在：${id}`);
     if (this.tracked.has(id)) {
-      const alive = s.port ? await tcpProbe(s.port) : true;
+      const alive = s.port ? await tcpProbe('127.0.0.1', s.port) : true;
       if (!alive) this.setStatus(id, 'Unhealthy');
       else this.setStatus(id, 'Running');
       return { alive, port: s.port };
     }
-    const alive = s.port ? await tcpProbe(s.port) : false;
+    const alive = s.port ? await tcpProbe('127.0.0.1', s.port) : false;
     return { alive, port: s.port };
   }
 

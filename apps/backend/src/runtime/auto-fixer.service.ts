@@ -28,6 +28,8 @@ export interface FixRequest {
   attempt: number;
   /** analyze-start：没有启动命令，让模型给出启动方式；repair：修复已有启动失败 */
   mode: 'analyze-start' | 'repair';
+  /** 取消信号：任务取消时 LLM 请求立即中断 */
+  signal?: AbortSignal;
 }
 
 export interface FixPlan {
@@ -102,13 +104,113 @@ export class AutoFixerService {
   async ensureNodeDeps(req: { projectId: string; rootPath: string; projectName: string }): Promise<boolean> {
     const pkg = path.join(req.rootPath, 'package.json');
     if (!fs.existsSync(pkg)) return false;
+    // 审计 F-03：先看依赖声明。零依赖项目 `npm install` 不会生成 node_modules 目录，
+    // 旧实现只认目录 → 每次启动都重装一遍（实测固定多花 2.2s，还会往仓库写 package-lock.json）。
+    try {
+      const pkgJson = JSON.parse(fs.readFileSync(pkg, 'utf-8')) as {
+        dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+        optionalDependencies?: Record<string, string>;
+        workspaces?: unknown;
+      };
+      const depCount = Object.keys(pkgJson.dependencies ?? {}).length
+        + Object.keys(pkgJson.devDependencies ?? {}).length
+        + Object.keys(pkgJson.optionalDependencies ?? {}).length;
+      if (depCount === 0) {
+        this.logs.log({ level: 'info', sourceModule: 'autostart', projectId: req.projectId, message: `依赖预检：${req.rootPath} 未声明任何依赖，跳过安装` });
+        return false;
+      }
+    } catch { /* package.json 解析失败：交给后面的安装/修复流程报错 */ }
     // 子目录里已有 node_modules（如 workspace 根安装过）也不跳过：根缺失就是缺
     if (fs.existsSync(path.join(req.rootPath, 'node_modules'))) return false;
+    // 安装成功过一次且依赖声明未变 → 跳过（stamp 记 package.json + 锁文件指纹）
+    const fingerprint = this.depsFingerprint(req.rootPath);
+    const stampFile = path.join(req.rootPath, '.devpilot', 'deps.stamp');
+    try {
+      const prev = JSON.parse(fs.readFileSync(stampFile, 'utf-8')) as { fingerprint?: string };
+      if (prev?.fingerprint && prev.fingerprint === fingerprint) {
+        this.logs.log({ level: 'info', sourceModule: 'autostart', projectId: req.projectId, message: '依赖预检：依赖指纹未变（上次安装已成功），跳过安装' });
+        return false;
+      }
+    } catch { /* 无 stamp 或损坏：正常安装 */ }
     const pm = fs.existsSync(path.join(req.rootPath, 'pnpm-lock.yaml')) ? 'pnpm'
       : fs.existsSync(path.join(req.rootPath, 'yarn.lock')) ? 'yarn' : 'npm';
+
+    // 供应链安全（任务书 §5.2）：
+    // - 有 package-lock.json → 优先 npm ci（按锁文件精确安装，不更新依赖）
+    // - lockfile 与 package.json 不一致（EUSAGE）→ 明确报告，不改写锁文件（留给用户决策）
+    // - 无 lockfile → 提示存在供应链漂移风险
+    // - 一律禁止全局安装（-g / --global / yarn global）
+    if (pm === 'npm' && fs.existsSync(path.join(req.rootPath, 'package-lock.json'))) {
+      let lockConsistent = true;
+      let lockErr = '';
+      try {
+        const pkgJson = JSON.parse(fs.readFileSync(pkg, 'utf-8')) as { name?: string; version?: string };
+        const lock = JSON.parse(fs.readFileSync(path.join(req.rootPath, 'package-lock.json'), 'utf-8')) as {
+          name?: string; version?: string; packages?: Record<string, { name?: string; version?: string }>;
+          lockfileVersion?: number;
+        };
+        const root = lock.packages?.[''];
+        const lockName = root?.name ?? lock.name;
+        const lockVersion = root?.version ?? lock.version;
+        if (pkgJson.name && lockName && pkgJson.name !== lockName) {
+          lockConsistent = false;
+          lockErr = `package.json name=${pkgJson.name} 与 package-lock.json name=${lockName} 不一致`;
+        } else if (pkgJson.version && lockVersion && pkgJson.version !== lockVersion) {
+          lockConsistent = false;
+          lockErr = `package.json version=${pkgJson.version} 与 package-lock.json version=${lockVersion} 不一致`;
+        }
+      } catch (e) {
+        lockConsistent = false;
+        lockErr = `锁文件解析失败：${String((e as Error)?.message ?? e).slice(0, 120)}`;
+      }
+      if (!lockConsistent) {
+        this.logs.log({ level: 'warn', sourceModule: 'autostart', projectId: req.projectId, message: `lockfile 校验未通过：${lockErr}。跳过 npm ci（不擅自改写锁文件），改用 npm install 重新生成依赖树。` });
+        const fallback = await this.runCommand('npm install --no-audit --no-fund', req.rootPath, req.projectId);
+        if (fallback.exitCode === 0) this.markDepsInstalled(req.rootPath, fingerprint);
+        return fallback.exitCode === 0;
+      }
+      this.logs.log({ level: 'info', sourceModule: 'autostart', projectId: req.projectId, message: '依赖预检：检测到 package-lock.json，使用 npm ci 按锁文件精确安装（不更新依赖版本）' });
+      const ci = await this.runCommand('npm ci --no-audit --no-fund', req.rootPath, req.projectId);
+      if (ci.exitCode === 0) { this.markDepsInstalled(req.rootPath, fingerprint); return true; }
+      this.logs.log({ level: 'warn', sourceModule: 'autostart', projectId: req.projectId, message: `npm ci 失败（exit=${ci.exitCode}）：${ci.output.slice(-200) || ci.error || '无输出'}。npm ci 不修改锁文件，改用 npm install 兜底。` });
+      const fallback = await this.runCommand('npm install --no-audit --no-fund', req.rootPath, req.projectId);
+      if (fallback.exitCode === 0) this.markDepsInstalled(req.rootPath, fingerprint);
+      return fallback.exitCode === 0;
+    }
+    if (pm === 'npm') {
+      this.logs.log({ level: 'warn', sourceModule: 'autostart', projectId: req.projectId, message: '依赖预检：项目无 lockfile（package-lock.json），依赖版本可能漂移；建议提交锁文件以获得可复现安装。' });
+    }
     this.logs.log({ level: 'info', sourceModule: 'autostart', projectId: req.projectId, message: `依赖预检：${req.rootPath} 缺少 node_modules，执行 ${pm} install` });
-    const r = await this.runCommand(`${pm} install`, req.rootPath, req.projectId);
+    const cmd = `${pm} install`;
+    if (/\s(-g|--global|global\s+add)\b/.test(cmd)) {
+      this.logs.log({ level: 'error', sourceModule: 'autostart', projectId: req.projectId, message: `拒绝全局安装：${cmd}（DevPilot 不执行 -g/--global 依赖安装）` });
+      return false;
+    }
+    const r = await this.runCommand(cmd, req.rootPath, req.projectId);
+    if (r.exitCode === 0) this.markDepsInstalled(req.rootPath, fingerprint);
     return r.exitCode === 0;
+  }
+
+  /** 依赖声明指纹：package.json + 各包管理器锁文件的 mtime/size（够便宜且能感知改动） */
+  private depsFingerprint(rootPath: string): string {
+    const files = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'];
+    const parts: string[] = [];
+    for (const f of files) {
+      try {
+        const st = fs.statSync(path.join(rootPath, f));
+        parts.push(`${f}:${st.size}:${Math.floor(st.mtimeMs)}`);
+      } catch { parts.push(`${f}:-`); }
+    }
+    return parts.join('|');
+  }
+
+  private markDepsInstalled(rootPath: string, fingerprint: string): void {
+    try {
+      const dir = path.join(rootPath, '.devpilot');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'deps.stamp'), JSON.stringify({ fingerprint, at: new Date().toISOString() }), 'utf-8');
+    } catch { /* 戳记写不了不影响启动，只是下次会再装一次 */ }
   }
 
   /**
@@ -324,7 +426,7 @@ export class AutoFixerService {
           { role: 'system', content: sys },
           { role: 'user', content: user },
         ],
-        { json: true },
+        { json: true, signal: req.signal },
       );
     } catch (e) {
       return { analysis: `修复 Agent 调用失败：${String(e).slice(0, 200)}`, commands: [], files: [] };

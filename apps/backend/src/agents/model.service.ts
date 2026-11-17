@@ -1,8 +1,33 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import fs from 'node:fs';
 import path from 'node:path';
+import type { Agent as UndiciAgent, RequestInit as UndiciRequestInit } from 'undici';
+
+/**
+ * undici 延迟加载：它只服务 LLM 出站请求（Agent 真正调用模型时），
+ * 却在启动期被整条模块图 eager require，实测占后端冷启动约 100ms。
+ * 改成首次调用时才载入，启动路径上不再为未使用的 HTTP 客户端付编译成本。
+ */
+type UndiciModule = typeof import('undici');
+let undiciModule: Promise<UndiciModule> | null = null;
+function undici(): Promise<UndiciModule> {
+  if (!undiciModule) undiciModule = import('undici');
+  return undiciModule;
+}
 import { LogService } from '../logs/log.service';
 import { credentials } from '@devpilot/platform-adapters';
+
+/** 每个 baseUrl 一个 keep-alive 连接池：LLM 每轮都要请求，TCP+TLS 握手（数百 ms）只发生一次 */
+const httpAgents = new Map<string, UndiciAgent>();
+async function agentFor(baseUrl: string): Promise<UndiciAgent> {
+  let a = httpAgents.get(baseUrl);
+  if (!a) {
+    const { Agent } = await undici();
+    a = new Agent({ keepAliveTimeout: 60_000, keepAliveMaxTimeout: 120_000, connections: 8 });
+    httpAgents.set(baseUrl, a);
+  }
+  return a;
+}
 
 /**
  * 模型适配层（多供应商，OpenAI 兼容协议，架构债 #3 第一批）：
@@ -186,14 +211,15 @@ export class ModelService {
   }
 
   /** 单供应商调用（内部）：失败抛错，由 chat 的降级链捕获 */
-  private async chatOnce(providerId: string, messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, opts?: { json?: boolean }): Promise<string> {
+  private async chatOnce(providerId: string, messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, opts?: { json?: boolean; signal?: AbortSignal }): Promise<string> {
     const p = this.resolveProvider(providerId);
     if (!p.baseUrl) throw new Error(`供应商 ${providerId} 未配置 baseUrl`);
     const key = this.apiKeyFor(providerId);
     if (!key) throw new Error(`供应商 ${providerId} 无可用 Key`);
     const model = this.overrides[providerId]?.model || p.defaultModel;
     const baseUrl = this.overrides[providerId]?.baseUrl || p.baseUrl;
-    const res = await fetch(`${baseUrl}/chat/completions`, {
+    const { fetch: undiciFetch } = await undici();
+    const res = await undiciFetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
       body: JSON.stringify({
@@ -201,7 +227,12 @@ export class ModelService {
         messages,
         ...(opts?.json ? { response_format: { type: 'json_object' } } : {}),
       }),
-    });
+      // 单供应商 120s 硬超时：不因网络挂起拖死整个 Agent 循环（降级链接手）；
+      // 与外部取消信号合并：任务取消时 LLM 请求立即中断（取消 5 秒硬指标的关键）
+      signal: AbortSignal.any([AbortSignal.timeout(120_000), ...(opts?.signal ? [opts.signal] : [])]),
+      // keep-alive 连接复用：LLM 每轮都要请求，TCP+TLS 握手只发生一次
+      dispatcher: await agentFor(baseUrl),
+    } as UndiciRequestInit);
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`model api error ${res.status}: ${text.slice(0, 300)}`);
@@ -227,18 +258,19 @@ export class ModelService {
    * 按 PROVIDER_CATALOG 顺序尝试其他已配置 Key 的供应商，全部失败才抛错。
    * 降级过程逐跳落日志，最终错误信息带完整尝试链。
    */
-  async chat(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, opts?: { json?: boolean }): Promise<string> {
+  async chat(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, opts?: { json?: boolean; signal?: AbortSignal }): Promise<string> {
+    // 外部中断信号（任务取消）：aborted 立即抛错，不再等当前请求自然结束
+    if (opts?.signal?.aborted) throw new Error('已取消');
     if (!(await this.loadKeyFromStore())) throw new Error('model api key not configured（请先 POST /api/v1/models/config 设置 API Key）');
     const attempts: string[] = [];
     const chain = [this.activeProvider, ...Object.keys(PROVIDER_CATALOG).filter((id) => id !== this.activeProvider)];
     for (const providerId of chain) {
-      // 逐个加载该供应商的 Key（vault 热读），无 Key 跳过
+      // 逐个检查该供应商的 Key：内存缓存优先，避免 Agent 循环里每轮都做 vault/文件 IO
       if (providerId !== this.activeProvider) {
-        const ok = await this.loadKeyFromStore(providerId);
-        if (!ok || !this.apiKey) { attempts.push(`${providerId}:no-key`); continue; }
+        const key = this.apiKeyFor(providerId);
+        if (!key) { attempts.push(`${providerId}:no-key`); continue; }
         (this as any)._keyCache = (this as any)._keyCache ?? new Map<string, string>();
-        (this as any)._keyCache.set(providerId, this.apiKey);
-        this.apiKey = null; // 复位，避免污染 active 的 key 状态
+        (this as any)._keyCache.set(providerId, key);
       }
       try {
         return await this.chatOnce(providerId, messages, opts);
