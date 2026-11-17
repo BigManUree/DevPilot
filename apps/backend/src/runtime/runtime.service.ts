@@ -1,4 +1,4 @@
-import { Injectable, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { spawn, execFile, ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,7 +11,7 @@ import { EventsGateway } from '../events.gateway';
 import { LogService } from '../logs/log.service';
 import { NotificationService } from '../notifications/notification.service';
 import type { ServiceStatus } from '@devpilot/shared-types';
-import { platform as plat } from '@devpilot/platform-adapters';
+import { platform as plat, cleanServiceEnv } from '@devpilot/platform-adapters';
 
 interface TrackedProcess {
   serviceId: string;
@@ -114,7 +114,20 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
         this.setStatus(serviceId, 'Failed');
         continue;
       }
-      const r = await this.startService(serviceId, sessionId);
+      const r = await this.startService(serviceId, sessionId).catch((e: unknown) => {
+        // 失败隔离（审计 S-03 配套）：单个服务启动失败（端口被外部进程占用、
+        // 缺启动命令等）只标记该服务，不能让整个项目启动循环中断——
+        // 否则一个端口冲突会把同项目里能跑的服务也一起拖成"没启动"。
+        const name = services.find((s) => s.id === serviceId)?.name ?? serviceId;
+        this.setStatus(serviceId, 'Failed');
+        this.logs.log({
+          level: 'error',
+          sourceModule: `service.${name}`,
+          projectId,
+          message: `启动失败（继续启动其余服务）：${String((e as Error)?.message ?? e).slice(0, 300)}`,
+        });
+        return { status: 'Failed' as ServiceStatus };
+      });
       results.push({ serviceId, status: r.status });
       if (r.status === 'Running') startedServices.add(serviceId);
     }
@@ -139,14 +152,20 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
    * 返回最终 access_path（可能为 '/'）。
    */
   async detectAccessUrl(serviceId: string): Promise<{ accessPath: string; url: string }> {
-    const svc = this.ds.db.prepare('SELECT * FROM project_services WHERE id = ?').get(serviceId) as
+    let svc = this.ds.db.prepare('SELECT * FROM project_services WHERE id = ?').get(serviceId) as
       | { id: string; name: string; port: number | null }
       | undefined;
     if (!svc) throw new Error('service not found');
-    if (!svc.port) throw new Error(`service ${svc.name} 未配置端口，无 HTTP 访问地址`);
+    // 端口缺失 → 先从运行日志自学习（Next 自定义 server 等场景），学不到才放弃
+    let port = svc.port;
+    if (!port) {
+      const learned = this.learnPortFromLogs(svc.name);
+      if (!learned) throw new Error(`service ${svc.name} 未配置端口且日志中无监听地址`);
+      port = learned;
+    }
 
-    const fromLog = this.accessPathFromLogs(svc.port, svc.name);
-    const fromRedirect = await this.finalPathAfterRedirects(svc.port, '/');
+    const fromLog = this.accessPathFromLogs(port, svc.name);
+    const fromRedirect = await this.finalPathAfterRedirects(port, '/');
     let accessPath = '/';
     if (fromLog && fromLog !== '/') accessPath = fromLog;
     else if (fromRedirect && fromRedirect !== '/') accessPath = fromRedirect;
@@ -154,7 +173,7 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     this.ds.db
       .prepare('UPDATE project_services SET access_path = ?, updated_at = ? WHERE id = ?')
       .run(accessPath, new Date().toISOString(), serviceId);
-    return { accessPath, url: `http://127.0.0.1:${svc.port}${accessPath === '/' ? '' : accessPath}` };
+    return { accessPath, url: `http://127.0.0.1:${port}${accessPath === '/' ? '' : accessPath}` };
   }
 
   /**
@@ -281,22 +300,54 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
 
   /** 启动成功后异步探测访问路径（不阻塞启动主流程） */
   private refreshAccessPathInBackground(serviceId: string, svcName: string, port: number | null): void {
-    if (!port) return;
-    // 等应用把欢迎日志写出来再探（部分应用启动后 1-2s 才打印面板地址）
-    setTimeout(() => {
-      void this.detectAccessUrl(serviceId).catch(() => {
-        this.logs.log({ level: 'debug', sourceModule: `service.${svcName}`, message: '访问路径探测失败（服务可能仍在启动中）' });
-      });
-    }, 2000);
+    // 带重试的访问地址探测：Next 自定义 server / vite 等在启动后数秒才真正可访问，
+    // 一次探测失败（页面还在编译）就放弃会导致「启动成功却没有访问地址」。
+    // 无端口的服务也探测：从运行日志自动学习真实端口（代码里写死端口但配置没解析到很常见）。
+    const attempts = [2000, 7000, 15000];
+    const run = (idx: number): void => {
+      setTimeout(() => {
+        void this.detectAccessUrl(serviceId)
+          .then(() => {
+            // 成功后广播一次服务事件，前端抽屉轮询/详情立即拿到 access_path
+            const svc = this.ds.db.prepare('SELECT project_id FROM project_services WHERE id = ?').get(serviceId) as { project_id: string } | undefined;
+            if (svc) this.broadcastServiceEvent(serviceId, svc.project_id);
+          })
+          .catch(() => {
+            if (idx + 1 < attempts.length) run(idx + 1);
+            else this.logs.log({ level: 'debug', sourceModule: `service.${svcName}`, message: '访问路径探测多次失败（服务可能未提供 HTTP 入口）' });
+          });
+      }, attempts[idx]);
+    };
+    run(0);
+  }
+
+  /** 从运行日志学习真实监听端口：http://(localhost|127.0.0.1):<port>；
+   *  自定义 server（如 career-ops web 的 server.mjs）代码里写死端口但分析器没解析到时自愈。 */
+  private learnPortFromLogs(svcName: string): number | null {
+    try {
+      const tail = this.logs.tail(`service.${svcName}`, 300);
+      if (!tail) return null;
+      const counts = new Map<number, number>();
+      for (const m of tail.matchAll(/http:\/\/(?:127\.0\.0\.1|localhost):(\d{2,5})/gi)) {
+        const p = Number(m[1]);
+        if (p >= 1024 && p <= 65535) counts.set(p, (counts.get(p) ?? 0) + 1);
+      }
+      if (!counts.size) return null;
+      const port = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      this.ds.db.prepare('UPDATE project_services SET port = ?, updated_at = ? WHERE name = ? AND (port IS NULL OR port != ?)')
+        .run(port, new Date().toISOString(), svcName, port);
+      this.logs.log({ level: 'info', sourceModule: `service.${svcName}`, message: `从运行日志自动识别到服务端口 ${port}，已更新服务配置` });
+      return port;
+    } catch { return null; }
   }
 
   /** 启动单个服务 */
-  async startService(serviceId: string, sessionId?: string): Promise<{ status: ServiceStatus; pid?: number; adopted?: boolean }> {
+  async startService(serviceId: string, sessionId?: string, opts?: { signal?: AbortSignal }): Promise<{ status: ServiceStatus; pid?: number; adopted?: boolean }> {
     const svc = this.ds.db.prepare('SELECT * FROM project_services WHERE id = ?').get(serviceId) as
       | { id: string; project_id: string; name: string; workdir: string; start_command: string | null; port: number | null; env_json: string | null; health_check_json: string | null }
       | undefined;
-    if (!svc) throw new Error('service not found');
-    if (!svc.start_command) throw new Error(`service ${svc.name} has no start_command`);
+    if (!svc) throw new NotFoundException(`服务不存在：${serviceId}`);
+    if (!svc.start_command) throw new ConflictException(`服务 ${svc.name} 没有配置启动命令（请先在服务配置里补充）`);
     if (this.tracked.has(serviceId)) return { status: 'Running', pid: this.trackedPid(this.tracked.get(serviceId)!) };
 
     // 端口预检：端口上已有实例在跑时，直接接管，不再重复拉起。
@@ -306,9 +357,37 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       const occupied = await this.portListening(svc.port);
       if (occupied) {
         const pid = await this.findListenerPid(svc.port);
+        // 受管服务互斥：端口上的实例属于本机另一个受管服务时不允许接管/终止
+        //（否则 A 项目停止会杀掉 B 项目服务并触发其自愈重启，产生跨项目副作用——第三轮审计实测缺陷）
+        const ownerTracked = pid
+          ? [...this.tracked.entries()].find(([, t]) => t.child?.pid === pid || t.pid === pid)
+          : undefined;
+        if (ownerTracked && ownerTracked[0] !== serviceId) {
+          const ownerSvc = this.ds.db.prepare('SELECT name, project_id FROM project_services WHERE id = ?').get(ownerTracked[0]) as { name: string; project_id: string } | undefined;
+          throw new Error(
+            `端口 ${svc.port} 已被本机受管服务「${ownerSvc?.name ?? ownerTracked[0].slice(0, 8)}」占用（PID ${pid}）。` +
+            `请先停止该服务，或为本服务改用其它端口；DevPilot 不允许通过接管跨服务终止进程。`,
+          );
+        }
         const hc = this.healthConfig(svc);
-        const httpOk = await this.httpProbe(svc.port, hc.path, hc.expectedStatus, hc.method);
+        const httpOk = await this.httpProbe(svc.port, hc.path, hc.expectedStatus, hc.method, hc.contains);
         if (httpOk) {
+          // 审计 S-03 修复：接管前必须证明该 PID 属于本项目。
+          // 旧实现只按「端口在听 + HTTP 有响应」接管，结果把用户自己的 Vite（PID 15948/5173）
+          // 当成 fixture 项目的服务，stop 时直接杀掉了前端开发服务器。
+          // 显式信任开关：某些应用会自行重启（自动更新），需要接管旧实例时由用户设置
+          // DEVIPILOT_TRUST_EXTERNAL_PORTS=1 恢复旧行为（默认关闭，安全优先）。
+          const owned = process.env.DEVIPILOT_TRUST_EXTERNAL_PORTS === '1'
+            ? true
+            : await this.pidBelongsToProject(pid, svc.project_id);
+          if (!owned) {
+            const detail = pid ? await this.describeProcess(pid) : '';
+            throw new Error(
+              `端口 ${svc.port} 已被外部进程${pid ? ` PID ${pid}${detail ? `（${detail}）` : ''}` : ''}占用，` +
+              `且没有证据表明它属于本项目（DevPilot 不接管/不终止外部实例，避免误杀无关进程）。` +
+              `如确认它是本项目的遗留实例，请先手动结束它，或在服务配置里改用其它端口。`,
+            );
+          }
           const sid = sessionId ?? randomUUID();
           this.tracked.set(serviceId, { serviceId, sessionId: sid, child: null, pid, adopted: true, startedAt: Date.now() });
           if (pid) this.appendSessionPids(sid, pid);
@@ -336,7 +415,9 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     this.setStatus(serviceId, 'Starting');
     const sid = sessionId ?? randomUUID();
     const { shell, args } = plat.shellFor(svc.start_command);
-    const env = svc.env_json ? { ...process.env, ...(JSON.parse(svc.env_json) as Record<string, string>) } : process.env;
+    // 清理宿主注入（NODE_OPTIONS / ELECTRON_RUN_AS_NODE / *_SHIM）：
+    // 不清理会让被托管项目继承编辑器的 safe-delete shim，构建工具删临时目录时被拦 → 启动失败。
+    const env = cleanServiceEnv(process.env, svc.env_json ? (JSON.parse(svc.env_json) as Record<string, string>) : null);
     const child = spawn(shell, args, { cwd: svc.workdir, env, windowsHide: true, ...(plat.shellFor(svc.start_command).options ?? {}) });
 
     this.tracked.set(serviceId, { serviceId, sessionId: sid, child, pid: child.pid, startedAt: Date.now() });
@@ -396,9 +477,13 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     // 窗口期内仍存活 = 常驻程序，也算成功。秒退且非 0 才是失败（入口/依赖问题）。
     let cliExitCode: number | null | undefined;
     const healthy = svc.port
-      ? await this.waitPort(svc.port, 60000)
+      ? await this.waitPort(svc.port, 60000, opts?.signal)
       : await new Promise<boolean>((resolve) => {
-          const t = setTimeout(() => resolve(child.exitCode === null && child.signalCode === null), 8000);
+          // 常驻判定：窗口内存活 = 常驻程序。
+          // 审计 P-03：旧值 3000ms 让「不绑端口的常驻服务」每次启动固定多等 3s
+          //（实测 4.5s vs 有端口 1.2s）。秒退崩溃由 exit 事件即时捕获，窗口只用于
+          // 确认「没有立刻退出」，900ms 足够区分「秒退」与「常驻」。
+          const t = setTimeout(() => resolve(child.exitCode === null && child.signalCode === null), 900);
           child.once('exit', (code) => { clearTimeout(t); cliExitCode = code; resolve(code === 0); });
         });
     if (!healthy) {
@@ -456,6 +541,15 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     } catch { /* 档案写失败不阻断启动 */ }
   }
 
+  /**
+   * 停止阶段的时间预算（硬指标：用户点「停止」→ 状态落地 ≤5s，多服务并行后总时长取决于最慢单个）。
+   * 旧值 stop_command 优雅期 5000ms + 兜底 600ms，且 stopProject 串行 → 3 个服务能拖到 17s。
+   */
+  private static readonly STOP_GRACE_MS = 1200;      // stop_command 优雅停止等待上限（超时即强杀）
+  private static readonly STOP_CONFIRM_MS = 400;     // 强杀后确认死亡的等待上限（期间实时探测）
+  private static readonly STOP_ADOPTED_WAIT_MS = 1500; // 外驻实例 taskkill /T /F 的等待上限
+  private static readonly STOP_POLL_MS = 60;         // 存活探测间隔（pidAlive 已是非阻塞系统调用）
+
   /** 停止单个服务：共享服务引用保护 */
   async stopService(serviceId: string, force = false): Promise<{ stopped: boolean; reason?: string }> {
     const svc = this.ds.db.prepare('SELECT * FROM project_services WHERE id = ?').get(serviceId) as
@@ -490,21 +584,34 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     // 外驻实例（接管来的，不归 DevPilot spawn）：只能按 PID 终止
     if (t.adopted) {
       const pid = this.trackedPid(t);
-      if (pid && this.pidAlive(pid)) this.killProcessTree(pid);
-      await new Promise((r) => setTimeout(r, 800));
+      if (pid && this.pidAlive(pid)) {
+        // 等待确认真正死亡（taskkill 是异步的，fire-and-forget 可能报 stopped 但进程还活着）
+        await plat.killTreeWait(pid, RuntimeService.STOP_ADOPTED_WAIT_MS);
+      }
+      // 条件等待兜底：死亡即继续（替代固定 sleep）
+      for (let waited = 0; pid && this.pidAlive(pid) && waited < RuntimeService.STOP_CONFIRM_MS; waited += RuntimeService.STOP_POLL_MS) {
+        await new Promise((r) => setTimeout(r, RuntimeService.STOP_POLL_MS));
+      }
+      const stillAlive = pid ? this.pidAlive(pid) : false;
       this.tracked.delete(serviceId);
       this.setStatus(serviceId, 'Stopped');
       this.broadcastServiceEvent(serviceId, svc.project_id);
       this.audit.record({
         subject: 'user:local-user', action: 'service.stop', target: svc.name, result: 'ok',
-        detail: { pid, method: 'adopted-pid' },
+        detail: { pid, method: 'adopted-pid', stillAlive },
       });
       this.writeRunArchive(svc, 'Stopped', { pid, method: 'adopted-pid' });
-      this.logs.log({ level: 'info', sourceModule: `service.${svc.name}`, projectId: svc.project_id, message: `已终止外部实例 PID ${pid ?? '未知'}（端口 ${svc.port ?? '—'}）` });
+      this.logs.log({
+        level: stillAlive ? 'error' : 'info',
+        sourceModule: `service.${svc.name}`, projectId: svc.project_id,
+        message: stillAlive
+          ? `外部实例 PID ${pid} 终止后仍存活（可能有守护重启）。请人工核查进程。`
+          : `已终止外部实例 PID ${pid ?? '未知'}（端口 ${svc.port ?? '—'}）`,
+      });
       return { stopped: true };
     }
 
-    // 1) 用户配置的 stop_command 优先（优雅停止），等待最多 5 秒
+    // 1) 用户配置的 stop_command 优先（优雅停止），最多等 STOP_GRACE_MS，超时立即强杀
     const full = this.ds.db.prepare('SELECT stop_command FROM project_services WHERE id = ?').get(serviceId) as { stop_command: string | null };
     let graceful = false;
     const pid = this.trackedPid(t);
@@ -512,9 +619,9 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
       const stop = plat.shellFor(full.stop_command);
       spawn(stop.shell, stop.args,
         { cwd: this.getServiceWorkdir(serviceId), windowsHide: true, ...(stop.options ?? {}) });
-      const deadline = Date.now() + 5000;
+      const deadline = Date.now() + RuntimeService.STOP_GRACE_MS;
       while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 400));
+        await new Promise((r) => setTimeout(r, RuntimeService.STOP_POLL_MS));
         if (t.child?.exitCode !== null && t.child?.exitCode !== undefined) { graceful = true; break; }
         if (!this.pidAlive(pid)) { graceful = true; break; }
       }
@@ -523,8 +630,10 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
 
     // 2) 回退：会话 PID 树强制终止（按 PID，不按名称）
     if (!graceful) this.killProcessTree(pid);
-    // 兜底等待退出
-    await new Promise((r) => setTimeout(r, 600));
+    // 兜底条件等待：死亡即继续（非阻塞探测，最多 STOP_CONFIRM_MS）
+    for (let waited = 0; pid && this.pidAlive(pid) && waited < RuntimeService.STOP_CONFIRM_MS; waited += RuntimeService.STOP_POLL_MS) {
+      await new Promise((r) => setTimeout(r, RuntimeService.STOP_POLL_MS));
+    }
     this.tracked.delete(serviceId);
     this.setStatus(serviceId, 'Stopped');
     this.broadcastServiceEvent(serviceId, svc.project_id);
@@ -547,6 +656,32 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     return t.pid ?? t.child?.pid;
   }
 
+  /** 当前被跟踪的、属于某项目的服务 id 集合（取消启动时的兜底停止目标：含尚未登记进 job 的竞态服务） */
+  trackedServiceIdsOfProject(projectId: string): string[] {
+    const out: string[] = [];
+    for (const serviceId of this.tracked.keys()) {
+      const row = this.ds.db.prepare('SELECT project_id FROM project_services WHERE id = ?').get(serviceId) as { project_id: string } | undefined;
+      if (row?.project_id === projectId) out.push(serviceId);
+    }
+    return out;
+  }
+
+  /** 单个服务是否仍有被跟踪的进程（前端「停止中」态判断用） */
+  isTracked(serviceId: string): boolean {
+    return this.tracked.has(serviceId);
+  }
+
+  /** PID 是否属于本机受管服务（返回服务名）——端口占用自愈前的安全检查，避免跨服务误杀 */
+  getTrackedServiceByPid(pid: number): string | null {
+    for (const t of this.tracked.values()) {
+      if (this.trackedPid(t) === pid) {
+        const s = this.ds.db.prepare('SELECT name FROM project_services WHERE id = ?').get(t.serviceId) as { name: string } | undefined;
+        return s?.name ?? t.serviceId.slice(0, 8);
+      }
+    }
+    return null;
+  }
+
   /** 单次端口连通检测（不重试，用于启动前预检） */
   private portListening(port: number): Promise<boolean> {
     return new Promise((resolve) => {
@@ -558,17 +693,26 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
   }
 
   /** HTTP 探活：任意响应（含 4xx/5xx）即认为该端口上是一个可用的 HTTP 服务 */
-  private httpProbe(port: number, urlPath = '/', expectedStatus?: number, method = 'GET'): Promise<boolean> {
+  private httpProbe(port: number, urlPath = '/', expectedStatus?: number, method = 'GET', contains?: string): Promise<boolean> {
     return new Promise((resolve) => {
       const req = http.request({ host: '127.0.0.1', port, path: urlPath, timeout: 2500, method, headers: { 'User-Agent': 'DevPilot-probe' } }, (res) => {
-        res.resume();
         // 期望状态码优先（用户可配置）；未配置时 4xx/5xx 不算健康：
         // Windows HTTP.sys（Microsoft-HTTPAPI/2.0）对任意 Host 都回 400，
         // 曾经因此把系统占用的端口误判成「项目实例」接管，实际服务根本没起来。
-        if (typeof expectedStatus === 'number') {
-          resolve(res.statusCode === expectedStatus);
+        const statusOk = typeof expectedStatus === 'number'
+          ? res.statusCode === expectedStatus
+          : typeof res.statusCode === 'number' && res.statusCode < 400;
+        if (!statusOk) { res.resume(); resolve(false); return; }
+        if (contains) {
+          // 响应体内容校验（任务书 §6.3）：状态码对了还不够，响应体必须包含期望内容
+          let body = '';
+          res.setEncoding('utf-8');
+          res.on('data', (c: string) => { body += c; if (body.length > 512 * 1024) res.destroy(); });
+          res.on('end', () => resolve(body.includes(contains)));
+          res.on('error', () => resolve(false));
         } else {
-          resolve(typeof res.statusCode === 'number' && res.statusCode < 400);
+          res.resume();
+          resolve(true);
         }
       });
       req.on('timeout', () => { req.destroy(); resolve(false); });
@@ -577,12 +721,12 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     });
   }
 
-  /** health_check_json 配置 → 探针参数（path/method/expectedStatus/timeout） */
-  private healthConfig(svc: { health_check_json?: string | null }): { path: string; method: string; expectedStatus?: number; timeoutMs: number } {
+  /** health_check_json 配置 → 探针参数（path/method/expectedStatus/contains/timeout） */
+  private healthConfig(svc: { health_check_json?: string | null }): { path: string; method: string; expectedStatus?: number; contains?: string; timeoutMs: number } {
     const fallback = { path: '/', method: 'GET', timeoutMs: 2500 };
     try {
       if (!svc.health_check_json) return fallback;
-      const h = JSON.parse(svc.health_check_json) as { path?: string; url?: string; method?: string; expectedStatus?: number; timeoutMs?: number; type?: string };
+      const h = JSON.parse(svc.health_check_json) as { path?: string; url?: string; method?: string; expectedStatus?: number; timeoutMs?: number; contains?: string; type?: string };
       let pathPart = fallback.path;
       if (h?.path) pathPart = h.path;
       else if (h?.url) {
@@ -593,15 +737,71 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
         path: pathPart,
         method: (h?.method ?? 'GET').toUpperCase(),
         expectedStatus: typeof h?.expectedStatus === 'number' ? h.expectedStatus : undefined,
+        contains: typeof h?.contains === 'string' ? h.contains : undefined,
         timeoutMs: typeof h?.timeoutMs === 'number' ? Math.min(h.timeoutMs, 15_000) : fallback.timeoutMs,
       };
     } catch { /* 配置非法则用默认 */ }
     return fallback;
   }
 
-  /** 按端口反查监听进程 PID（Windows netstat / *nix lsof），失败返回 undefined */
-  private findListenerPid(port: number): Promise<number | undefined> {
+  /**
+   * 该 PID 是否可归属于本项目（审计 S-03 修复的核心判据）。
+   * 三个正向证据，命中任一即认为属于本项目：
+   *   1. run_archives 里本项目记录过这个 PID（DevPilot 自己拉起过的进程，跨后端重启仍有效）
+   *   2. runtime_sessions.pids_json 里本项目记录过（当前/历史会话）
+   *   3. 进程命令行或可执行路径落在项目 root_path 内（手工在该目录里启动的实例）
+   * 都没有 → 视为外部进程：不接管、不终止。
+   */
+  async pidBelongsToProject(pid: number | undefined, projectId: string): Promise<boolean> {
+    if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
+    try {
+      const arch = this.ds.db
+        .prepare('SELECT 1 AS hit FROM run_archives WHERE project_id = ? AND pid = ? LIMIT 1')
+        .get(projectId, pid) as { hit: number } | undefined;
+      if (arch) return true;
+    } catch { /* 老库无该表则跳过 */ }
+    try {
+      const rows = this.ds.db
+        .prepare('SELECT pids_json FROM runtime_sessions WHERE project_id = ? ORDER BY started_at DESC LIMIT 30')
+        .all(projectId) as Array<{ pids_json: string | null }>;
+      for (const r of rows) {
+        try {
+          const pids = JSON.parse(r.pids_json ?? '[]') as unknown[];
+          if (pids.map(Number).includes(pid)) return true;
+        } catch { /* 坏 JSON 忽略 */ }
+      }
+    } catch { /* 忽略 */ }
+    const info = await this.processExecutableInfo(pid);
+    if (!info) return false;
+    const row = this.ds.db.prepare('SELECT root_path FROM projects WHERE id = ?').get(projectId) as { root_path: string } | undefined;
+    if (!row?.root_path) return false;
+    const norm = (s: string) => s.replace(/\//g, '\\').toLowerCase();
+    const root = norm(row.root_path).replace(/\\+$/, '');
+    const inRoot = (s: string | undefined) => !!s && norm(s).includes(root);
+    return inRoot(info.commandLine) || inRoot(info.executablePath);
+  }
+
+  /** 进程可执行路径 + 命令行（Windows 走 CIM；其它平台走 ps），取不到返回 null */
+  private processExecutableInfo(pid: number): Promise<{ commandLine: string; executablePath: string } | null> {
+    if (process.platform !== 'win32') {
+      return new Promise((resolve) => {
+        execFile('ps', ['-p', String(pid), '-o', 'args='], { timeout: 4000 }, (err, out) =>
+          resolve(err ? null : { commandLine: String(out ?? '').trim(), executablePath: '' }));
+      });
+    }
     return new Promise((resolve) => {
+      const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue; if ($p) { $p.ExecutablePath; '---'; $p.CommandLine }`;
+      execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 8000 }, (err, out) => {
+        if (err) return resolve(null);
+        const [exe = '', cmd = ''] = String(out ?? '').split('---');
+        if (!exe.trim() && !cmd.trim()) return resolve(null);
+        resolve({ executablePath: exe.trim(), commandLine: cmd.trim() });
+      });
+    });
+  }
+
+  /** 按端口反查监听进程 PID（Windows netstat / *nix lsof），失败返回 undefined */
+  private findListenerPid(port: number): Promise<number | undefined> {    return new Promise((resolve) => {
       const isWin = process.platform === 'win32';
       const cmd = isWin ? 'netstat' : 'lsof';
       const args = isWin ? ['-ano', '-p', 'TCP'] : ['-ti', `tcp:${port}`, '-sTCP:LISTEN'];
@@ -656,15 +856,30 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
     return plat.pidAlive(pid);
   }
 
-  /** 停止整个项目：仅处理本项目会话创建的进程；共享服务按引用保护跳过 */
+  /**
+   * 停止整个项目：仅处理本项目会话创建的进程；共享服务按引用保护跳过。
+   * 并行停止（旧实现串行 await，N 个服务 × 单服务等待 → 3 个服务能到 17s）：
+   * 总时长 = 最慢的单个服务，配合 stopService 内部预算保证 ≤5s 硬指标。
+   */
   async stopProject(projectId: string): Promise<Array<{ serviceId: string; stopped: boolean; reason?: string }>> {
-    const services = this.ds.db
-      .prepare(`SELECT id FROM project_services WHERE project_id = ? AND status IN ('Running','Starting','Unhealthy')`)
+    const rows = this.ds.db
+      .prepare(`SELECT id FROM project_services WHERE project_id = ? AND status IN ('Running','Starting','Unhealthy','Stopping')`)
       .all(projectId) as Array<{ id: string }>;
-    const results = [];
-    for (const s of services) {
-      results.push({ serviceId: s.id, ...(await this.stopService(s.id)) });
+    const ids = new Set(rows.map((r) => r.id));
+    // 兜底：DB 状态可能滞后（启动中刚 spawn、状态还没落库），tracked 里属于本项目的服务一并停
+    for (const serviceId of this.tracked.keys()) {
+      if (ids.has(serviceId)) continue;
+      const row = this.ds.db.prepare('SELECT project_id FROM project_services WHERE id = ?').get(serviceId) as { project_id: string } | undefined;
+      if (row?.project_id === projectId) ids.add(serviceId);
     }
+    const list = [...ids];
+    const settled = await Promise.allSettled(list.map((serviceId) => this.stopService(serviceId)));
+    const results = list.map((serviceId, i) => {
+      const s = settled[i];
+      return s.status === 'fulfilled'
+        ? { serviceId, ...s.value }
+        : { serviceId, stopped: false, reason: String((s.reason as Error)?.message ?? s.reason) };
+    });
     // 会话关闭
     this.ds.db
       .prepare(`UPDATE runtime_sessions SET stopped_at=?, pids_json=? WHERE project_id = ? AND stopped_at IS NULL`)
@@ -677,16 +892,17 @@ export class RuntimeService implements OnApplicationShutdown, OnModuleInit {
   }
 
   /** 健康探针：TCP 端口连通 */
-  private waitPort(port: number, timeoutMs: number): Promise<boolean> {
+  private waitPort(port: number, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     return new Promise((resolve) => {
       const attempt = () => {
+        if (signal?.aborted) { resolve(false); return; }
         const sock = net.connect({ host: '127.0.0.1', port, timeout: 1500 });
         sock.once('connect', () => { sock.destroy(); resolve(true); });
         sock.once('error', () => {
           sock.destroy();
           if (Date.now() > deadline) resolve(false);
-          else setTimeout(attempt, 500);
+          else setTimeout(attempt, 150);
         });
         sock.once('timeout', () => sock.destroy());
       };
