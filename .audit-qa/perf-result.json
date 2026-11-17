@@ -1,0 +1,186 @@
+{
+  "api": {
+    "GET /projects ×100": {
+      "n": 100,
+      "min": 1,
+      "p50": 1.2,
+      "p95": 1.7,
+      "max": 1.8,
+      "avg": 1.2
+    },
+    "GET /logs?limit=50 ×50": {
+      "n": 50,
+      "min": 1.5,
+      "p50": 1.6,
+      "p95": 3.9,
+      "max": 4.2,
+      "avg": 1.8
+    },
+    "GET /runtime/tracked ×50": {
+      "n": 50,
+      "min": 0.8,
+      "p50": 0.9,
+      "p95": 1.6,
+      "max": 3.1,
+      "avg": 1
+    },
+    "GET /environments ×30": {
+      "n": 30,
+      "min": 991.4,
+      "p50": 1161.8,
+      "p95": 1231.9,
+      "max": 1490.6,
+      "avg": 1138.2
+    },
+    "POST /tools/call(echo) ×30": {
+      "n": 30,
+      "min": 39.8,
+      "p50": 50.2,
+      "p95": 61.5,
+      "max": 80.4,
+      "avg": 51.1
+    },
+    "并发 30× GET /projects": {
+      "n": 30,
+      "min": 18.8,
+      "p50": 32.3,
+      "p95": 37.8,
+      "max": 38.7,
+      "avg": 32.2,
+      "wallMs": 42,
+      "statuses": {
+        "200": 30
+      }
+    },
+    "并发 10× GET /environments/scan-versions": {
+      "n": 10,
+      "min": 13079.5,
+      "p50": 13913,
+      "p95": 14166.7,
+      "max": 14166.7,
+      "avg": 13672.2,
+      "wallMs": 14168,
+      "statuses": {
+        "200": 10
+      }
+    },
+    "并发 5× GET /logs?limit=500": {
+      "n": 5,
+      "min": 3,
+      "p50": 5.9,
+      "p95": 8,
+      "max": 8,
+      "avg": 5.6,
+      "wallMs": 9,
+      "statuses": {
+        "200": 5
+      }
+    },
+    "大目录列举(C:\\Windows\\System32)+健康探针": {
+      "dirMs": 10,
+      "dirStatus": 200,
+      "dirCount": 194,
+      "healthDuringMs": 2,
+      "healthStatus": 200,
+      "wallMs": 35
+    }
+  },
+  "startup": {
+    "A 有端口(4211) 3 轮": {
+      "starts": [
+        3512,
+        3462,
+        3346
+      ],
+      "stops": [
+        286,
+        281,
+        222
+      ]
+    },
+    "B 无端口 2 轮": {
+      "starts": [
+        3341,
+        3385
+      ],
+      "stops": [
+        220,
+        279
+      ]
+    }
+  },
+  "stop": {
+    "A#1": 286,
+    "A#2": 281,
+    "A#3": 222,
+    "B#1": 220,
+    "B#2": 279
+  },
+  "imports": {
+    "folder/有端口": {
+      "jobId": "baa9ec38-ea90-45a0-ba92-00a8287ca9b5",
+      "status": "done",
+      "ms": 47,
+      "phases": [],
+      "error": null
+    },
+    "folder/无端口": {
+      "jobId": "cbf21650-a676-4a45-a79b-164c9bcab5ab",
+      "status": "done",
+      "ms": 20,
+      "phases": [],
+      "error": null
+    }
+  },
+  "timeline": {
+    "A-有端口-首次": [
+      {
+        "at": "08:31:14.487",
+        "phase": "detect",
+        "msg": "检测到 node 项目的 node_modules 缺失，已自动安装依赖"
+      },
+      {
+        "at": "08:31:14.494",
+        "phase": "detect",
+        "msg": "未发现一键启动脚本，使用已确认的启动命令：npm run dev"
+      },
+      {
+        "at": "08:31:14.498",
+        "phase": "start",
+        "msg": "第 1 次启动：npm run dev"
+      },
+      {
+        "at": "08:31:15.493",
+        "phase": "done",
+        "msg": "启动成功（健康校验通过）：npm run dev，端口 4211"
+      }
+    ],
+    "A-停止": {
+      "ms": 286,
+      "status": 201,
+      "body": "[{\"serviceId\":\"8dac82b3-65c8-4bd6-8070-204beb51e51b\",\"stopped\":true}]"
+    },
+    "B-无端口-首次": [
+      {
+        "at": "08:31:27.875",
+        "phase": "detect",
+        "msg": "检测到 node 项目的 node_modules 缺失，已自动安装依赖"
+      },
+      {
+        "at": "08:31:27.881",
+        "phase": "detect",
+        "msg": "未发现一键启动脚本，使用已确认的启动命令：npm run dev"
+      },
+      {
+        "at": "08:31:27.886",
+        "phase": "start",
+        "msg": "第 1 次启动：npm run dev"
+      },
+      {
+        "at": "08:31:28.865",
+        "phase": "done",
+        "msg": "启动成功（健康校验通过）：npm run dev，端口 4211"
+      }
+    ]
+  }
+}

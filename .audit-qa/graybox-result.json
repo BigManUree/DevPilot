@@ -1,0 +1,238 @@
+{
+  "base": "http://127.0.0.1:37150/api/v1",
+  "at": "2026-11-15T08:30:11.658Z",
+  "out": [
+    {
+      "case": "导入-文件夹/Vite 类",
+      "jobId": "9d00a7bc-f652-402f-a309-231a5bb70d2d",
+      "status": "done",
+      "elapsedMs": 60180,
+      "error": null,
+      "projectId": null
+    },
+    {
+      "case": "导入-文件夹/纯 Node",
+      "jobId": "5f6e59df-40b3-4d09-bec8-b94d30ae640d",
+      "status": "done",
+      "elapsedMs": 60264,
+      "error": null,
+      "projectId": null
+    },
+    {
+      "case": "项目列表",
+      "count": 2,
+      "pa": "a60dc3b3-d03b-471a-a5c3-eec2dc7e3d28",
+      "pb": "79571d2c-daa7-4196-8198-574ac91cb69c",
+      "paName": "vite-app",
+      "pbName": "plain-node"
+    },
+    {
+      "case": "项目详情/服务识别",
+      "services": [
+        {
+          "name": "qa-vite-app-main",
+          "port": null,
+          "cmd": "npm run dev",
+          "status": "Stopped"
+        }
+      ]
+    },
+    {
+      "case": "服务端口设置",
+      "service": "qa-vite-app-main",
+      "status": 201,
+      "body": "{\"serviceId\":\"c64fe891-271b-4255-92a8-df0a0458c449\",\"restartPolicy\":\"off\"}"
+    },
+    {
+      "case": "启动-A/并发",
+      "status": "Success",
+      "elapsedMs": 7451,
+      "port": null,
+      "report": "启动成功（健康校验通过）：npm run dev"
+    },
+    {
+      "case": "启动-B/并发",
+      "status": "Failed",
+      "elapsedMs": 14321,
+      "port": null,
+      "report": "无法确定启动方式。修复 Agent 调用失败：Error: all providers failed（尝试链：deepseek:TypeError: fetch failed | openai:no-key | moonshot:no-key | qwen:no-key | zhipu:no-key | custom:"
+    },
+    {
+      "case": "并发后受管进程",
+      "count": 1,
+      "ports": [
+        33492
+      ]
+    },
+    {
+      "case": "停止-项目A",
+      "status": 201,
+      "elapsedMs": 214,
+      "body": "[{\"serviceId\":\"c64fe891-271b-4255-92a8-df0a0458c449\",\"stopped\":true}]"
+    },
+    {
+      "case": "启动-CSRF 前置启动",
+      "status": "Success",
+      "elapsedMs": 6109,
+      "port": null,
+      "report": "启动成功（热启动快速校验通过）：npm run dev"
+    },
+    {
+      "case": "CSRF-表单型跨站 POST /stop",
+      "httpStatus": 201,
+      "body": "[{\"serviceId\":\"c64fe891-271b-4255-92a8-df0a0458c449\",\"stopped\":true}]",
+      "runningServicesAfter": 0,
+      "csrfEffective": true,
+      "note": "无 Origin 校验 + 无自定义头要求 → 任意网页可用简单请求触发"
+    },
+    {
+      "case": "工具调用-user 主体命令执行",
+      "status": 201,
+      "ok": true,
+      "permission": "allowed",
+      "stdout": "DEV_PILOT_QA_PROBE"
+    },
+    {
+      "case": "工具调用-agent 主体命令执行",
+      "status": 201,
+      "ok": false,
+      "permission": "pending_approval",
+      "approvalId": "dfdcf214-43d8-4a8d-8f4c-14dc239f25b0",
+      "error": "PERMISSION_DENIED_PENDING_APPROVAL"
+    },
+    {
+      "case": "工具调用-agent 越界写",
+      "status": 201,
+      "ok": false,
+      "error": "PERMISSION_DENIED_PENDING_APPROVAL"
+    },
+    {
+      "case": "工具调用-user 主体写系统目录",
+      "status": 201,
+      "ok": false,
+      "error": "拒绝写入受保护目录：C:\\Windows\\Temp\\qa-user-escape.txt"
+    },
+    {
+      "case": "符号链接创建",
+      "ok": false,
+      "error": "Error: Command failed: cmd /c mklink /D \"C:\\Users\\administer\\WorkBuddy\\DevPilot\\.audit-qa\\fixtures\\vite-app\\escape-link\""
+    },
+    {
+      "case": "工作区-符号链接指向 C:\\Windows",
+      "status": 400,
+      "body": "{\"message\":\"路径不存在或不可访问：C:\\\\Users\\\\administer\\\\WorkBuddy\\\\DevPilot\\\\.audit-qa\\\\fixtures\\\\vite-app\\\\escape-link\",\"error\":\"Bad Request\",\"statusCode\":400}",
+      "blocked": true
+    },
+    {
+      "case": "工作区-项目根对照",
+      "status": 200,
+      "entries": 5
+    },
+    {
+      "case": "导入-ZIP Slip 载荷",
+      "jobId": "05ffd9ba-c47f-4866-bf4c-de17e4e9b32e",
+      "status": "failed",
+      "elapsedMs": 60198,
+      "error": "压缩包包含路径穿越条目：../devpilot-slip-escape.txt",
+      "projectId": null
+    },
+    {
+      "case": "ZIP Slip 结果",
+      "jobStatus": "failed",
+      "escaped1": false,
+      "escaped2": false,
+      "escapedAbs": false
+    },
+    {
+      "case": "备份创建",
+      "status": 201,
+      "body": "{\"id\":\"7a00f3b0-b1fd-4f08-8c95-6c98f227a0a0\",\"file\":\"C:\\\\Users\\\\administer\\\\WorkBuddy\\\\DevPilot\\\\.audit-qa\\\\data\\\\backups\\\\devpilot-2026-11-15T08-30-08-524Z.db\""
+    },
+    {
+      "case": "备份校验",
+      "status": 201,
+      "body": "{\"ok\":true}"
+    },
+    {
+      "case": "项目导出",
+      "status": 201,
+      "body": "{\"file\":\"C:\\\\Users\\\\administer\\\\WorkBuddy\\\\DevPilot\\\\.audit-qa\\\\data\\\\backups\\\\project-a60dc3b3-d03b-471a-a5c3-eec2dc7e3d28-1794731408618.json\",\"counts\":{\"services\":1,\"profiles\":0}}"
+    },
+    {
+      "case": "本地服务-创建",
+      "status": 201,
+      "body": "{\"id\":\"fa7050af-0d6a-44c9-afeb-f7b2a8550ca2\"}"
+    },
+    {
+      "case": "本地服务-启动任意可执行",
+      "status": 201,
+      "body": "{\"ok\":true,\"pid\":36128}"
+    },
+    {
+      "case": "本地服务-停止",
+      "status": 201,
+      "body": "{\"ok\":true}"
+    },
+    {
+      "case": "终端-创建(任意 cwd)",
+      "status": 201,
+      "body": "{\"sessionId\":\"11909a1e-5229-4400-948f-26a12db070a1\",\"cwd\":\"C:/Windows\"}"
+    },
+    {
+      "case": "任务创建",
+      "status": 201,
+      "body": "{\"taskId\":\"9d048ba8-b25a-4147-ac76-d3ad7b225f6c\"}"
+    },
+    {
+      "case": "任务-pause",
+      "status": 409,
+      "body": "{\"message\":\"仅执行中的任务可暂停，当前状态：Pending\",\"error\":\"Conflict\",\"statusCode\":409}"
+    },
+    {
+      "case": "任务-resume",
+      "status": 409,
+      "body": "{\"message\":\"仅已暂停的任务可恢复，当前状态：Pending\",\"error\":\"Conflict\",\"statusCode\":409}"
+    },
+    {
+      "case": "任务-cancel",
+      "status": 201,
+      "body": "{\"taskId\":\"9d048ba8-b25a-4147-ac76-d3ad7b225f6c\",\"status\":\"Cancelled\"}"
+    },
+    {
+      "case": "MCP initialize",
+      "status": 201,
+      "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{},\"resources\":{},\"prompts\":{}},\"serverInfo\":{\"name\":\"devpilot\",\"version\":\"0.1.0\"}}}"
+    },
+    {
+      "case": "MCP tools/list",
+      "status": 201,
+      "tools": [
+        "devpilot.health",
+        "devpilot.projects",
+        "devpilot.tasks",
+        "devpilot.task.create",
+        "devpilot.task.run",
+        "devpilot.services",
+        "devpilot.notifications"
+      ]
+    },
+    {
+      "case": "MCP tools/call",
+      "status": 201,
+      "body": "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32000,\"message\":\"Error: unknown tool: project.list\"}}"
+    },
+    {
+      "case": "删除项目-deleteFiles=true",
+      "status": 200,
+      "body": "{\"projectId\":\"a60dc3b3-d03b-471a-a5c3-eec2dc7e3d28\",\"deletedRecord\":true,\"deletedFiles\":true}",
+      "fileExistedBefore": true,
+      "fileExistsAfter": false,
+      "filesDeleted": true
+    },
+    {
+      "case": "删除项目-保留文件",
+      "status": 200,
+      "fileExists": true
+    }
+  ]
+}

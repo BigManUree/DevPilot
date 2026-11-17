@@ -1,0 +1,1639 @@
+{
+  "base": "http://127.0.0.1:37100/api/v1",
+  "at": "2026-11-15T08:25:42.669Z",
+  "summary": {
+    "total": 105,
+    "byStatus": {
+      "200": 59,
+      "201": 16,
+      "204": 2,
+      "400": 8,
+      "404": 5,
+      "500": 15
+    },
+    "failedExpectation": [
+      {
+        "name": "停止项目-不存在ID",
+        "method": "POST",
+        "url": "/projects/00000000-0000-0000-0000-000000000000/stop",
+        "status": 201,
+        "expect": [
+          404,
+          400,
+          200
+        ],
+        "snippet": "[]"
+      },
+      {
+        "name": "创建任务-空体",
+        "method": "POST",
+        "url": "/tasks",
+        "status": 201,
+        "expect": [
+          400,
+          422,
+          500
+        ],
+        "snippet": "{\"taskId\":\"9e207673-e245-4e47-acc7-ef94b7f32c82\"}"
+      },
+      {
+        "name": "模型切换-非法供应商",
+        "method": "POST",
+        "url": "/models/switch",
+        "status": 404,
+        "expect": [
+          400,
+          500,
+          200
+        ],
+        "snippet": "{\"message\":\"未知供应商：no-such-provider（可选：deepseek/openai/moonshot/qwen/zhipu/custom）\",\"error\":\"Not Found\",\"statusCode\":404}"
+      },
+      {
+        "name": "日志查询-limit非数字",
+        "method": "GET",
+        "url": "/logs?limit=abc",
+        "status": 500,
+        "expect": [
+          400,
+          200
+        ],
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "通知已读-不存在ID",
+        "method": "POST",
+        "url": "/notifications/00000000-0000-0000-0000-000000000000/read",
+        "status": 201,
+        "expect": [
+          404,
+          200,
+          500
+        ],
+        "snippet": "{\"ok\":true}"
+      },
+      {
+        "name": "批量删除-空数组",
+        "method": "POST",
+        "url": "/notifications/delete-batch",
+        "status": 201,
+        "expect": [
+          200,
+          400,
+          500
+        ],
+        "snippet": "{\"ok\":false,\"deleted\":0,\"error\":\"ids 不能为空\"}"
+      },
+      {
+        "name": "批量删除-非数组",
+        "method": "POST",
+        "url": "/notifications/delete-batch",
+        "status": 201,
+        "expect": [
+          400,
+          500
+        ],
+        "snippet": "{\"ok\":false,\"deleted\":0,\"error\":\"ids 不能为空\"}"
+      },
+      {
+        "name": "审计-limit非数字",
+        "method": "GET",
+        "url": "/audit?limit=abc",
+        "status": 500,
+        "expect": [
+          200,
+          400
+        ],
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "工具调用-未知工具",
+        "method": "POST",
+        "url": "/tools/call",
+        "status": 201,
+        "expect": [
+          400,
+          500
+        ],
+        "snippet": "{\"toolCallId\":\"9efb6681-ab1d-4f3d-b973-0887bbf0faa1\",\"ok\":true,\"permission\":\"allowed\"}"
+      },
+      {
+        "name": "记忆检索-limit非数字",
+        "method": "GET",
+        "url": "/memories/search?q=a&limit=abc",
+        "status": 500,
+        "expect": [
+          200,
+          400
+        ],
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "MCP initialize",
+        "method": "POST",
+        "url": "/mcp",
+        "status": 201,
+        "expect": 200,
+        "snippet": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{},\"resources\":{},\"prompts\":{}},\"serverInfo\":{\"name\":\"devpilot\",\"versio"
+      },
+      {
+        "name": "MCP tools/list",
+        "method": "POST",
+        "url": "/mcp",
+        "status": 201,
+        "expect": 200,
+        "snippet": "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"devpilot.health\",\"description\":\"DevPilot 后端健康状态与版本\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}},{\"name\""
+      },
+      {
+        "name": "MCP 未知方法",
+        "method": "POST",
+        "url": "/mcp",
+        "status": 201,
+        "expect": [
+          200,
+          400
+        ],
+        "snippet": "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32601,\"message\":\"Method not found: no/such\"}}"
+      },
+      {
+        "name": "超大 body(11MB)",
+        "method": "POST",
+        "url": "/tools/call",
+        "status": 500,
+        "expect": [
+          413,
+          400
+        ],
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "原型污染体",
+        "method": "POST",
+        "url": "/memories",
+        "status": 201,
+        "expect": [
+          200,
+          400
+        ],
+        "snippet": "{\"id\":\"8c46cd80-9e78-4d23-976a-1e4159f9e8e7\",\"scope\":\"global\"}"
+      },
+      {
+        "name": "记忆 scope 非法",
+        "method": "POST",
+        "url": "/memories",
+        "status": 500,
+        "expect": [
+          400
+        ],
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "SSRF-非 http 协议",
+        "method": "POST",
+        "url": "/projects/import/unified",
+        "status": 201,
+        "expect": [
+          400,
+          200
+        ],
+        "snippet": "{\"jobId\":\"c1922666-dbca-4af8-8025-0602099d27be\"}"
+      },
+      {
+        "name": "导入-非法 source",
+        "method": "POST",
+        "url": "/projects/import/unified",
+        "status": 201,
+        "expect": [
+          400,
+          500
+        ],
+        "snippet": "{\"jobId\":\"48e0714a-aa76-4fe7-86c2-11eb2b776acc\"}"
+      },
+      {
+        "name": "压缩包-ZIP Slip 探测(不存在)",
+        "method": "POST",
+        "url": "/projects/import/unified",
+        "status": 201,
+        "expect": [
+          200,
+          400,
+          500
+        ],
+        "snippet": "{\"jobId\":\"14689664-c787-46d6-a32b-7bb3e6b8418f\"}"
+      }
+    ],
+    "serverErrors": [
+      {
+        "name": "项目详情-不存在ID",
+        "url": "/projects/00000000-0000-0000-0000-000000000000",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "项目详情-非法ID串",
+        "url": "/projects/not-a-uuid",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "启动服务-不存在ID",
+        "url": "/services/00000000-0000-0000-0000-000000000000/start",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "服务终端-不存在ID",
+        "url": "/services/00000000-0000-0000-0000-000000000000/terminal",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "任务取消-不存在",
+        "url": "/tasks/00000000-0000-0000-0000-000000000000/cancel",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "日志查询-limit非数字",
+        "url": "/logs?limit=abc",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "审计-limit非数字",
+        "url": "/audit?limit=abc",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "审批-不存在ID",
+        "url": "/approvals/00000000-0000-0000-0000-000000000000/approve",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "工具调用-缺参数",
+        "url": "/tools/call",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "记忆检索-limit非数字",
+        "url": "/memories/search?q=a&limit=abc",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "Content-Type 错误",
+        "url": "/tasks",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "超大 body(11MB)",
+        "url": "/tools/call",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "SQL 注入-项目ID",
+        "url": "/projects/1'%20OR%20'1'%3D'1",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "记忆 scope 非法",
+        "url": "/memories",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      },
+      {
+        "name": "导入-缺 ref",
+        "url": "/projects/import/unified",
+        "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+      }
+    ]
+  },
+  "results": [
+    {
+      "name": "健康检查",
+      "method": "GET",
+      "url": "/health",
+      "status": 200,
+      "ms": 26,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"status\":\"ok\",\"version\":\"0.1.0\",\"time\":\"2026-11-15T08:25:04.412Z\"}"
+    },
+    {
+      "name": "系统数据状态",
+      "method": "GET",
+      "url": "/system/data-status",
+      "status": 200,
+      "ms": 3,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"schema_version\":19,\"migrations_applied\":19,\"tables\":37,\"status\":\"ok\"}"
+    },
+    {
+      "name": "更新检查",
+      "method": "GET",
+      "url": "/system/update-check",
+      "status": 200,
+      "ms": 2,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"currentVersion\":\"0.1.0\",\"source\":null,\"updateAvailable\":false,\"latestVersion\":\"0.1.0\",\"downloadUrl\":null,\"notes\":null,\"error\":null}"
+    },
+    {
+      "name": "盘符/目录列举",
+      "method": "GET",
+      "url": "/system/fs/dirs",
+      "status": 200,
+      "ms": 3,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"path\":\"\",\"parent\":null,\"dirs\":[{\"name\":\"C:\\\\\",\"path\":\"C:\\\\\"},{\"name\":\"D:\\\\\",\"path\":\"D:\\\\\"}]}"
+    },
+    {
+      "name": "目录列举-不存在",
+      "method": "GET",
+      "url": "/system/fs/dirs?path=Z%3A%5Cno-such-dir",
+      "status": 200,
+      "ms": 2,
+      "expect": 200,
+      "note": "返回 error 字段而非 4xx",
+      "error": null,
+      "snippet": "{\"error\":\"Error: ENOENT: no such file or directory, stat 'Z:\\\\no-such-dir'\"}"
+    },
+    {
+      "name": "项目列表",
+      "method": "GET",
+      "url": "/projects",
+      "status": 200,
+      "ms": 3,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"c286f062-f249-444c-b3fa-5ad783713a03\",\"name\":\"AIHOT-main\",\"root_path\":\"D:\\\\develop\\\\AIHOT-main\",\"project_type\":\"docker-compose\",\"language\":\"javascript/t"
+    },
+    {
+      "name": "项目详情",
+      "method": "GET",
+      "url": "/projects/c286f062-f249-444c-b3fa-5ad783713a03",
+      "status": 200,
+      "ms": 4,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"project\":{\"id\":\"c286f062-f249-444c-b3fa-5ad783713a03\",\"name\":\"AIHOT-main\",\"root_path\":\"D:\\\\develop\\\\AIHOT-main\",\"project_type\":\"docker-compose\",\"language\":\"ja"
+    },
+    {
+      "name": "项目组件档案",
+      "method": "GET",
+      "url": "/projects/c286f062-f249-444c-b3fa-5ad783713a03/profile",
+      "status": 200,
+      "ms": 2,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"fingerprint\":\"170c467af0671c3daf18deb2f382d036\",\"analyzedAt\":\"2026-11-15T06:38:20.805Z\",\"language\":{\"value\":\"typescript\",\"confidence\":0.95,\"evidence\":[{\"file\""
+    },
+    {
+      "name": "项目运行档案",
+      "method": "GET",
+      "url": "/projects/c286f062-f249-444c-b3fa-5ad783713a03/archives",
+      "status": 200,
+      "ms": 3,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"runs\":[{\"run_kind\":\"service\",\"command\":\"python -m http.server 8501\",\"port\":8501,\"pid\":2492,\"status\":\"Stopped\",\"summary\":\"postgres → Stopped\",\"created_at\":\"202"
+    },
+    {
+      "name": "项目图标",
+      "method": "GET",
+      "url": "/projects/c286f062-f249-444c-b3fa-5ad783713a03/icon",
+      "status": 200,
+      "ms": 15,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"dataUrl\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAACgCAYAAADjGbI8AAAAAXNSR0IArs4c6QAAIABJREFUeF6MvQeAXWW1Pb7OuX1mkkBCQgKhg0BARUCxQsDCUxAEVCz4sGNFn9"
+    },
+    {
+      "name": "项目启动脚本探测",
+      "method": "GET",
+      "url": "/projects/c286f062-f249-444c-b3fa-5ad783713a03/launcher",
+      "status": 200,
+      "ms": 9,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"rootPath\":\"D:\\\\develop\\\\AIHOT-main\",\"found\":true,\"script\":{\"relative\":\"start.bat\",\"command\":\"\\\"python\\\" -m http.server 8501\",\"kind\":\"http.server\",\"port\":8000,"
+    },
+    {
+      "name": "项目 autostart 状态",
+      "method": "GET",
+      "url": "/projects/c286f062-f249-444c-b3fa-5ad783713a03/autostart",
+      "status": 200,
+      "ms": 1,
+      "expect": [
+        200,
+        404
+      ],
+      "note": null,
+      "error": null,
+      "snippet": ""
+    },
+    {
+      "name": "项目详情-不存在ID",
+      "method": "GET",
+      "url": "/projects/00000000-0000-0000-0000-000000000000",
+      "status": 500,
+      "ms": 1,
+      "expect": [
+        404,
+        400,
+        500
+      ],
+      "note": "期望 404",
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "项目详情-非法ID串",
+      "method": "GET",
+      "url": "/projects/not-a-uuid",
+      "status": 500,
+      "ms": 1,
+      "expect": [
+        404,
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "扫描候选目录-缺参",
+      "method": "GET",
+      "url": "/projects/scan-candidates",
+      "status": 200,
+      "ms": 1,
+      "expect": [
+        200,
+        400
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"candidates\":[]}"
+    },
+    {
+      "name": "扫描候选目录-不存在路径",
+      "method": "GET",
+      "url": "/projects/scan-candidates?dir=Z%3A%5Cno-such",
+      "status": 200,
+      "ms": 1,
+      "expect": [
+        200,
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"candidates\":[]}"
+    },
+    {
+      "name": "运行会话列表",
+      "method": "GET",
+      "url": "/runtime/sessions",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"2e60c0ed-2043-4943-89d9-6297c13dd8f1\",\"project_id\":\"84500571-4ca8-43a0-bc9d-834a0301b1a0\",\"started_at\":\"2026-11-12T07:53:04.471Z\",\"stopped_at\":\"2026-11-"
+    },
+    {
+      "name": "受管进程列表",
+      "method": "GET",
+      "url": "/runtime/tracked",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[]"
+    },
+    {
+      "name": "autostart 任务-不存在",
+      "method": "GET",
+      "url": "/autostart/00000000-0000-0000-0000-000000000000",
+      "status": 200,
+      "ms": 1,
+      "expect": [
+        404,
+        200
+      ],
+      "note": "期望 404",
+      "error": null,
+      "snippet": "{\"error\":\"not found\"}"
+    },
+    {
+      "name": "停止项目-不存在ID",
+      "method": "POST",
+      "url": "/projects/00000000-0000-0000-0000-000000000000/stop",
+      "status": 201,
+      "ms": 1,
+      "expect": [
+        404,
+        400,
+        200
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "[]"
+    },
+    {
+      "name": "启动服务-不存在ID",
+      "method": "POST",
+      "url": "/services/00000000-0000-0000-0000-000000000000/start",
+      "status": 500,
+      "ms": 1,
+      "expect": [
+        404,
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "服务终端-不存在ID",
+      "method": "POST",
+      "url": "/services/00000000-0000-0000-0000-000000000000/terminal",
+      "status": 500,
+      "ms": 1,
+      "expect": [
+        404,
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "Agent 列表",
+      "method": "GET",
+      "url": "/agents",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"supervisor\",\"type\":\"supervisor\",\"name\":\"Supervisor 主控\",\"version\":\"0.1.0\",\"origin\":\"builtin\",\"capabilities_json\":\"[\\\"intent\\\",\\\"planning\\\",\\\"delegation\\\""
+    },
+    {
+      "name": "工具列表",
+      "method": "GET",
+      "url": "/tools",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"name\":\"project.inspect\",\"title\":\"查看项目基本信息（路径/语言/框架/服务/组件树摘要）\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}},\"outputHint\":\"项目元数据 JSON\",\"category\":\"project_a"
+    },
+    {
+      "name": "模型供应商",
+      "method": "GET",
+      "url": "/models/providers",
+      "status": 200,
+      "ms": 2,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"deepseek\",\"label\":\"DeepSeek\",\"baseUrl\":\"https://api.deepseek.com/v1\",\"defaultModel\":\"deepseek-chat\",\"active\":true,\"keyConfigured\":true},{\"id\":\"openai\",\""
+    },
+    {
+      "name": "模型状态",
+      "method": "GET",
+      "url": "/models/status",
+      "status": 200,
+      "ms": 2,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"provider\":\"deepseek\",\"label\":\"DeepSeek\",\"baseUrl\":\"https://api.deepseek.com/v1\",\"model\":\"deepseek-chat\",\"keyConfigured\":true,\"keyBackend\":null,\"providers\":[{\""
+    },
+    {
+      "name": "任务列表",
+      "method": "GET",
+      "url": "/tasks",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"a73834bf-3161-454a-8c1d-82fb93b1397c\",\"project_scope\":\"a0239130-3b66-472e-b617-dd1f3c106b14\",\"task_type\":\"ai-task\",\"input_summary\":\"给这个项目写一个一键启动的脚本\",\"st"
+    },
+    {
+      "name": "任务详情-不存在",
+      "method": "GET",
+      "url": "/tasks/00000000-0000-0000-0000-000000000000",
+      "status": 404,
+      "ms": 1,
+      "expect": [
+        404,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"message\":\"任务不存在：00000000-0000-0000-0000-000000000000\",\"error\":\"Not Found\",\"statusCode\":404}"
+    },
+    {
+      "name": "任务取消-不存在",
+      "method": "POST",
+      "url": "/tasks/00000000-0000-0000-0000-000000000000/cancel",
+      "status": 500,
+      "ms": 1,
+      "expect": [
+        404,
+        500,
+        200
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "创建任务-空体",
+      "method": "POST",
+      "url": "/tasks",
+      "status": 201,
+      "ms": 157,
+      "expect": [
+        400,
+        422,
+        500
+      ],
+      "note": "期望 400 而非 500",
+      "error": null,
+      "snippet": "{\"taskId\":\"9e207673-e245-4e47-acc7-ef94b7f32c82\"}"
+    },
+    {
+      "name": "模型切换-非法供应商",
+      "method": "POST",
+      "url": "/models/switch",
+      "status": 404,
+      "ms": 1,
+      "expect": [
+        400,
+        500,
+        200
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"message\":\"未知供应商：no-such-provider（可选：deepseek/openai/moonshot/qwen/zhipu/custom）\",\"error\":\"Not Found\",\"statusCode\":404}"
+    },
+    {
+      "name": "日志查询",
+      "method": "GET",
+      "url": "/logs?limit=5",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"total\":4566,\"rows\":[{\"id\":\"1662ead2-f5d6-49af-addc-1b732a5ce077\",\"level\":\"info\",\"source_module\":\"plugin:echo-hook\",\"project_id\":null,\"task_id\":null,\"agent_id\""
+    },
+    {
+      "name": "日志查询-limit非数字",
+      "method": "GET",
+      "url": "/logs?limit=abc",
+      "status": 500,
+      "ms": 1,
+      "expect": [
+        400,
+        200
+      ],
+      "note": "NaN 进 SQL 会 500",
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "日志查询-limit负数",
+      "method": "GET",
+      "url": "/logs?limit=-1",
+      "status": 200,
+      "ms": 55,
+      "expect": [
+        200,
+        400
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"total\":4566,\"rows\":[{\"id\":\"1662ead2-f5d6-49af-addc-1b732a5ce077\",\"level\":\"info\",\"source_module\":\"plugin:echo-hook\",\"project_id\":null,\"task_id\":null,\"agent_id\""
+    },
+    {
+      "name": "日志查询-limit超大",
+      "method": "GET",
+      "url": "/logs?limit=999999999",
+      "status": 200,
+      "ms": 46,
+      "expect": [
+        200,
+        400
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"total\":4566,\"rows\":[{\"id\":\"1662ead2-f5d6-49af-addc-1b732a5ce077\",\"level\":\"info\",\"source_module\":\"plugin:echo-hook\",\"project_id\":null,\"task_id\":null,\"agent_id\""
+    },
+    {
+      "name": "日志查询-注入串",
+      "method": "GET",
+      "url": "/logs?level='%20OR%201%3D1--",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": "SQL 注入探针",
+      "error": null,
+      "snippet": "{\"total\":0,\"rows\":[]}"
+    },
+    {
+      "name": "日志 tail",
+      "method": "GET",
+      "url": "/logs/tail?sourceModule=runtime&lines=20",
+      "status": 200,
+      "ms": 3,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"sourceModule\":\"runtime\",\"tail\":\"\"}"
+    },
+    {
+      "name": "日志 tail-路径穿越",
+      "method": "GET",
+      "url": "/logs/tail?sourceModule=..%2F..%2F..%2Fwindows%2Fwin.ini",
+      "status": 200,
+      "ms": 2,
+      "expect": [
+        200,
+        400
+      ],
+      "note": "文件名清洗验证",
+      "error": null,
+      "snippet": "{\"sourceModule\":\"../../../windows/win.ini\",\"tail\":\"\"}"
+    },
+    {
+      "name": "通知列表",
+      "method": "GET",
+      "url": "/notifications?limit=5",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"55ffc233-9176-4709-b5fe-282086a4b8cc\",\"event_id\":null,\"type\":\"project.autostart.ok\",\"title\":\"项目 sure 已成功启动\",\"content_summary\":\"启动成功（热启动快速校验通过）：npm run d"
+    },
+    {
+      "name": "未读数",
+      "method": "GET",
+      "url": "/notifications/unread-count",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "22"
+    },
+    {
+      "name": "通知规则",
+      "method": "GET",
+      "url": "/notifications/rules",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[]"
+    },
+    {
+      "name": "通知已读-不存在ID",
+      "method": "POST",
+      "url": "/notifications/00000000-0000-0000-0000-000000000000/read",
+      "status": 201,
+      "ms": 1,
+      "expect": [
+        404,
+        200,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"ok\":true}"
+    },
+    {
+      "name": "批量删除-空数组",
+      "method": "POST",
+      "url": "/notifications/delete-batch",
+      "status": 201,
+      "ms": 1,
+      "expect": [
+        200,
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"ok\":false,\"deleted\":0,\"error\":\"ids 不能为空\"}"
+    },
+    {
+      "name": "批量删除-非数组",
+      "method": "POST",
+      "url": "/notifications/delete-batch",
+      "status": 201,
+      "ms": 1,
+      "expect": [
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"ok\":false,\"deleted\":0,\"error\":\"ids 不能为空\"}"
+    },
+    {
+      "name": "审批列表",
+      "method": "GET",
+      "url": "/approvals",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[]"
+    },
+    {
+      "name": "权限列表",
+      "method": "GET",
+      "url": "/permissions",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"30c234a4-4087-4e5a-bb8b-56bd0a7e2267\",\"subject_type\":\"agent\",\"subject_id\":\"diag-agent\",\"category\":\"command_execution\",\"resource_scope\":\"[\\\"3eed4b09-f477"
+    },
+    {
+      "name": "审批模式",
+      "method": "GET",
+      "url": "/permissions/mode",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"mode\":\"auto\"}"
+    },
+    {
+      "name": "审计列表",
+      "method": "GET",
+      "url": "/audit?limit=5",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"9c25c9ae-fe8b-4824-b211-d0c41697b545\",\"subject\":\"user:local-user\",\"action\":\"service.stop\",\"target\":\"sure-desktop-main\",\"result\":\"ok\",\"trace_id\":null,\"de"
+    },
+    {
+      "name": "审计-limit非数字",
+      "method": "GET",
+      "url": "/audit?limit=abc",
+      "status": 500,
+      "ms": 1,
+      "expect": [
+        200,
+        400
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "审批-不存在ID",
+      "method": "POST",
+      "url": "/approvals/00000000-0000-0000-0000-000000000000/approve",
+      "status": 500,
+      "ms": 1,
+      "expect": [
+        404,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "工具调用-未知工具",
+      "method": "POST",
+      "url": "/tools/call",
+      "status": 201,
+      "ms": 2,
+      "expect": [
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"toolCallId\":\"9efb6681-ab1d-4f3d-b973-0887bbf0faa1\",\"ok\":true,\"permission\":\"allowed\"}"
+    },
+    {
+      "name": "工具调用-缺参数",
+      "method": "POST",
+      "url": "/tools/call",
+      "status": 500,
+      "ms": 1,
+      "expect": [
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "环境探针",
+      "method": "GET",
+      "url": "/environments",
+      "status": 200,
+      "ms": 1076,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"node\",\"name\":\"Node.js\",\"status\":\"ok\",\"version\":\"22.22.2\",\"installHint\":\"https://nodejs.org/\"},{\"id\":\"npm\",\"name\":\"npm\",\"status\":\"ok\",\"version\":\"11.8.0\","
+    },
+    {
+      "name": "版本扫描",
+      "method": "GET",
+      "url": "/environments/scan-versions",
+      "status": 200,
+      "ms": 3067,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"maven\":[],\"gradle\":[],\"rust\":[],\"php\":[],\"docker\":[],\"node\":[{\"toolId\":\"node\",\"version\":\"22.22.2\",\"executable\":\"C:\\\\Users\\\\administer\\\\.workbuddy\\\\binaries\\\\n"
+    },
+    {
+      "name": "项目环境体检",
+      "method": "GET",
+      "url": "/environments/check/c286f062-f249-444c-b3fa-5ad783713a03",
+      "status": 200,
+      "ms": 1002,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"projectId\":\"c286f062-f249-444c-b3fa-5ad783713a03\",\"requirements\":[{\"toolId\":\"node\",\"reason\":\"JavaScript/TypeScript 运行时\",\"status\":\"ok\",\"version\":\"22.22.2\",\"ins"
+    },
+    {
+      "name": "项目环境版本匹配",
+      "method": "GET",
+      "url": "/environments/match/c286f062-f249-444c-b3fa-5ad783713a03",
+      "status": 200,
+      "ms": 263,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"projectId\":\"c286f062-f249-444c-b3fa-5ad783713a03\",\"overall\":\"mismatch\",\"matches\":[{\"component\":{\"id\":\"root\",\"name\":\"AIHOT-main\"},\"toolId\":\"node\",\"requirement\""
+    },
+    {
+      "name": "项目服务清单",
+      "method": "GET",
+      "url": "/environments/services/c286f062-f249-444c-b3fa-5ad783713a03",
+      "status": 200,
+      "ms": 1282,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"projectId\":\"c286f062-f249-444c-b3fa-5ad783713a03\",\"services\":[{\"type\":\"postgres\",\"port\":5432,\"listening\":true,\"processName\":\"postgres\",\"status\":\"running\",\"sou"
+    },
+    {
+      "name": "项目环境变量",
+      "method": "GET",
+      "url": "/environments/env-vars/c286f062-f249-444c-b3fa-5ad783713a03",
+      "status": 200,
+      "ms": 4,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"projectId\":\"c286f062-f249-444c-b3fa-5ad783713a03\",\"vars\":[{\"key\":\"SITE_URL\",\"component\":\"AIHOT-main\",\"source\":\".env.example\",\"sensitive\":false,\"provided\":true"
+    },
+    {
+      "name": "配置档案列表",
+      "method": "GET",
+      "url": "/config-center/profiles?projectId=c286f062-f249-444c-b3fa-5ad783713a03",
+      "status": 200,
+      "ms": 2,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[]"
+    },
+    {
+      "name": "配置档案-不存在项目",
+      "method": "GET",
+      "url": "/config-center/profiles?projectId=no-such",
+      "status": 200,
+      "ms": 2,
+      "expect": [
+        200,
+        404
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "[]"
+    },
+    {
+      "name": "记忆列表",
+      "method": "GET",
+      "url": "/memories?limit=5",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"36d6eade-1a8b-4a1d-9b0c-f8dc3dd01586\",\"scope\":\"task\",\"project_id\":\"a0239130-3b66-472e-b617-dd1f3c106b14\",\"task_id\":\"a73834bf-3161-454a-8c1d-82fb93b1397c"
+    },
+    {
+      "name": "记忆检索",
+      "method": "GET",
+      "url": "/memories/search?q=runtime",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"rows\":[],\"total\":0}"
+    },
+    {
+      "name": "记忆检索-limit非数字",
+      "method": "GET",
+      "url": "/memories/search?q=a&limit=abc",
+      "status": 500,
+      "ms": 2,
+      "expect": [
+        200,
+        400
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "记忆详情-不存在",
+      "method": "GET",
+      "url": "/memories/00000000-0000-0000-0000-000000000000",
+      "status": 200,
+      "ms": 1,
+      "expect": [
+        200,
+        404
+      ],
+      "note": "实现返回 null",
+      "error": null,
+      "snippet": ""
+    },
+    {
+      "name": "数据库连接列表",
+      "method": "GET",
+      "url": "/databases/connections",
+      "status": 200,
+      "ms": 2,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"4478c6d7-d111-4c60-ad5c-d63e3037b222\",\"name\":\"devpilot-main\",\"db_type\":\"sqlite\",\"host\":null,\"port\":null,\"database_name\":\"C:/Users/administer/AppData/Roa"
+    },
+    {
+      "name": "数据库探测",
+      "method": "GET",
+      "url": "/databases/detect",
+      "status": 200,
+      "ms": 334,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"kind\":\"mysql\",\"name\":\"MySQL\",\"port\":3306,\"portOpen\":true,\"winService\":\"MySQL\",\"winServiceRunning\":true},{\"kind\":\"postgres\",\"name\":\"PostgreSQL\",\"port\":5432,\"p"
+    },
+    {
+      "name": "本地服务列表",
+      "method": "GET",
+      "url": "/local-services",
+      "status": 200,
+      "ms": 2,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[]"
+    },
+    {
+      "name": "外部工具探测",
+      "method": "GET",
+      "url": "/external-tools",
+      "status": 200,
+      "ms": 281,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"vscode\",\"name\":\"VS Code\",\"kind\":\"ide\",\"exePath\":\"D:\\\\soft\\\\Microsoft VS Code\\\\bin\\\\code.cmd\",\"status\":\"ok\"},{\"id\":\"idea\",\"name\":\"IntelliJ IDEA\",\"kind\":\""
+    },
+    {
+      "name": "AVD 列表",
+      "method": "GET",
+      "url": "/external-tools/avds",
+      "status": 200,
+      "ms": 275,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"ok\":false,\"avds\":[],\"error\":\"未找到 emulator.exe（检查 ANDROID_HOME）\"}"
+    },
+    {
+      "name": "插件列表",
+      "method": "GET",
+      "url": "/plugins",
+      "status": 200,
+      "ms": 4,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"echo-hook\",\"name\":\"回显插件\",\"version\":\"1.0.0\",\"kind\":\"hook\",\"hooks\":[{\"event\":\"notification.new\",\"action\":\"log\"},{\"event\":\"task.failed\",\"action\":\"notify\",\""
+    },
+    {
+      "name": "工作流列表",
+      "method": "GET",
+      "url": "/workflows",
+      "status": 200,
+      "ms": 2,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"56eb0d8f-0e42-4376-8d94-330dc56635cb\",\"name\":\"p22-cron-1794392429002\",\"enabled\":true,\"steps\":1,\"trigger\":\"cron 0 9 * * 1-5\",\"updated_at\":\"2026-11-11T10:"
+    },
+    {
+      "name": "工作流详情-不存在",
+      "method": "GET",
+      "url": "/workflows/no-such-id",
+      "status": 404,
+      "ms": 1,
+      "expect": [
+        404,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"message\":\"工作流不存在：no-such-id\",\"error\":\"Not Found\",\"statusCode\":404}"
+    },
+    {
+      "name": "备份列表",
+      "method": "GET",
+      "url": "/backups",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"4390789c-1ab5-46e3-ad52-74c74d10f775\",\"backup_type\":\"manual\",\"scope\":\"global\",\"file_path\":\"C:\\\\Users\\\\administer\\\\AppData\\\\Roaming\\\\devpilot\\\\data\\\\back"
+    },
+    {
+      "name": "目录浏览-项目根",
+      "method": "GET",
+      "url": "/workspace/dir?dirPath=D%3A%5Cdevelop%5CAIHOT-main",
+      "status": 200,
+      "ms": 4,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"root\":\"D:\\\\develop\\\\AIHOT-main\",\"entries\":[{\"name\":\"_autoupdate\",\"path\":\"D:/develop/AIHOT-main/_autoupdate\",\"isDir\":true,\"ext\":\"\"},{\"name\":\"_backup\",\"path\":\"D"
+    },
+    {
+      "name": "目录浏览-穿越到上级",
+      "method": "GET",
+      "url": "/workspace/dir?dirPath=D%3A%5Cdevelop",
+      "status": 400,
+      "ms": 1,
+      "expect": [
+        400
+      ],
+      "note": "必须拒绝",
+      "error": null,
+      "snippet": "{\"message\":\"路径不在任何已注册项目内，拒绝访问：D:\\\\develop\",\"error\":\"Bad Request\",\"statusCode\":400}"
+    },
+    {
+      "name": "目录浏览-系统目录",
+      "method": "GET",
+      "url": "/workspace/dir?dirPath=C%3A%5CWindows",
+      "status": 400,
+      "ms": 1,
+      "expect": [
+        400
+      ],
+      "note": "必须拒绝",
+      "error": null,
+      "snippet": "{\"message\":\"路径不在任何已注册项目内，拒绝访问：C:\\\\Windows\",\"error\":\"Bad Request\",\"statusCode\":400}"
+    },
+    {
+      "name": "目录浏览-空参数",
+      "method": "GET",
+      "url": "/workspace/dir",
+      "status": 400,
+      "ms": 1,
+      "expect": [
+        400
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"message\":\"缺少路径参数\",\"error\":\"Bad Request\",\"statusCode\":400}"
+    },
+    {
+      "name": "读文件-不存在",
+      "method": "GET",
+      "url": "/workspace/file?filePath=D%3A%5Cdevelop%5CAIHOT-main%5Cno-such-file.txt",
+      "status": 400,
+      "ms": 1,
+      "expect": [
+        400,
+        404
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"message\":\"路径不存在或不可访问：D:\\\\develop\\\\AIHOT-main\\\\no-such-file.txt\",\"error\":\"Bad Request\",\"statusCode\":400}"
+    },
+    {
+      "name": "读文件-系统 hosts",
+      "method": "GET",
+      "url": "/workspace/file?filePath=C%3A%5CWindows%5CSystem32%5Cdrivers%5Cetc%5Chosts",
+      "status": 400,
+      "ms": 1,
+      "expect": [
+        400
+      ],
+      "note": "必须拒绝",
+      "error": null,
+      "snippet": "{\"message\":\"路径不在任何已注册项目内，拒绝访问：C:\\\\Windows\\\\System32\\\\drivers\\\\etc\\\\hosts\",\"error\":\"Bad Request\",\"statusCode\":400}"
+    },
+    {
+      "name": "写文件-项目外",
+      "method": "POST",
+      "url": "/workspace/file",
+      "status": 400,
+      "ms": 2,
+      "expect": [
+        400
+      ],
+      "note": "必须拒绝",
+      "error": null,
+      "snippet": "{\"message\":\"路径不在任何已注册项目内，拒绝访问：C:\\\\qa-escape.txt\",\"error\":\"Bad Request\",\"statusCode\":400}"
+    },
+    {
+      "name": "Git status",
+      "method": "GET",
+      "url": "/git/status?repoPath=D%3A%5Cdevelop%5CAIHOT-main",
+      "status": 200,
+      "ms": 82,
+      "expect": [
+        200,
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"branch\":\"main\",\"aheadBehind\":[],\"clean\":false,\"files\":[{\"status\":\"M\",\"path\":\"package-lock.json\"},{\"status\":\"??\",\"path\":\".devpilot-backup/\"},{\"status\":\"??\",\"pa"
+    },
+    {
+      "name": "Git 仓库列表",
+      "method": "GET",
+      "url": "/git/repos",
+      "status": 200,
+      "ms": 1,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "[{\"id\":\"350ac898-1654-4656-9a2c-79c66a78d396\",\"project_id\":\"d810ad02-efbb-48d6-ad0d-93457b519ab0\",\"repo_path\":\"C:/Users/ADMINI~1/AppData/Local/Temp/git-test-rep"
+    },
+    {
+      "name": "Git status-不存在路径",
+      "method": "GET",
+      "url": "/git/status?repoPath=Z%3A%5Cno-such",
+      "status": 200,
+      "ms": 1,
+      "expect": [
+        200,
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"isRepo\":false,\"branch\":null,\"aheadBehind\":[],\"clean\":true,\"files\":[],\"recentCommits\":[]}"
+    },
+    {
+      "name": "MCP GET",
+      "method": "GET",
+      "url": "/mcp",
+      "status": 200,
+      "ms": 30012,
+      "expect": [
+        200,
+        405
+      ],
+      "note": null,
+      "error": "The operation was aborted due to timeout",
+      "snippet": ""
+    },
+    {
+      "name": "MCP initialize",
+      "method": "POST",
+      "url": "/mcp",
+      "status": 201,
+      "ms": 5,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{},\"resources\":{},\"prompts\":{}},\"serverInfo\":{\"name\":\"devpilot\",\"versio"
+    },
+    {
+      "name": "MCP tools/list",
+      "method": "POST",
+      "url": "/mcp",
+      "status": 201,
+      "ms": 5,
+      "expect": 200,
+      "note": null,
+      "error": null,
+      "snippet": "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"devpilot.health\",\"description\":\"DevPilot 后端健康状态与版本\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}},{\"name\""
+    },
+    {
+      "name": "MCP 未知方法",
+      "method": "POST",
+      "url": "/mcp",
+      "status": 201,
+      "ms": 2,
+      "expect": [
+        200,
+        400
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32601,\"message\":\"Method not found: no/such\"}}"
+    },
+    {
+      "name": "MCP 非法 JSON",
+      "method": "POST",
+      "url": "/mcp",
+      "status": 400,
+      "ms": 2,
+      "expect": [
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"message\":\"Expected property name or '}' in JSON at position 1 (line 1 column 2)\",\"error\":\"Bad Request\",\"statusCode\":400}"
+    },
+    {
+      "name": "未知路由",
+      "method": "GET",
+      "url": "/no-such-endpoint",
+      "status": 404,
+      "ms": 1,
+      "expect": 404,
+      "note": null,
+      "error": null,
+      "snippet": "{\"message\":\"Cannot GET /api/v1/no-such-endpoint\",\"error\":\"Not Found\",\"statusCode\":404}"
+    },
+    {
+      "name": "方法不允许(PUT projects)",
+      "method": "PUT",
+      "url": "/projects",
+      "status": 404,
+      "ms": 1,
+      "expect": [
+        404,
+        405
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"message\":\"Cannot PUT /api/v1/projects\",\"error\":\"Not Found\",\"statusCode\":404}"
+    },
+    {
+      "name": "非法 JSON 体",
+      "method": "POST",
+      "url": "/projects/scan-candidates",
+      "status": 400,
+      "ms": 1,
+      "expect": [
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"message\":\"Unexpected end of JSON input\",\"error\":\"Bad Request\",\"statusCode\":400}"
+    },
+    {
+      "name": "Content-Type 错误",
+      "method": "POST",
+      "url": "/tasks",
+      "status": 500,
+      "ms": 2,
+      "expect": [
+        400,
+        415,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "超大 body(11MB)",
+      "method": "POST",
+      "url": "/tools/call",
+      "status": 500,
+      "ms": 14,
+      "expect": [
+        413,
+        400
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "CORS 预检-允许源",
+      "method": "OPTIONS",
+      "url": "/projects",
+      "status": 204,
+      "ms": 4,
+      "expect": [
+        204,
+        200
+      ],
+      "note": null,
+      "error": null,
+      "snippet": ""
+    },
+    {
+      "name": "CORS 预检-恶意源",
+      "method": "OPTIONS",
+      "url": "/projects",
+      "status": 204,
+      "ms": 74,
+      "expect": [
+        204,
+        200
+      ],
+      "note": "应无 ACAO 头",
+      "error": null,
+      "snippet": ""
+    },
+    {
+      "name": "SQL 注入-项目ID",
+      "method": "GET",
+      "url": "/projects/1'%20OR%20'1'%3D'1",
+      "status": 500,
+      "ms": 1,
+      "expect": [
+        404,
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "XSS 反射-项目名",
+      "method": "POST",
+      "url": "/notifications",
+      "status": 201,
+      "ms": 20,
+      "expect": [
+        200,
+        201,
+        400
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"id\":\"22320757-00a6-4f58-afe6-a586ac74b525\"}"
+    },
+    {
+      "name": "原型污染体",
+      "method": "POST",
+      "url": "/memories",
+      "status": 201,
+      "ms": 8,
+      "expect": [
+        200,
+        400
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"id\":\"8c46cd80-9e78-4d23-976a-1e4159f9e8e7\",\"scope\":\"global\"}"
+    },
+    {
+      "name": "记忆 scope 非法",
+      "method": "POST",
+      "url": "/memories",
+      "status": 500,
+      "ms": 1,
+      "expect": [
+        400
+      ],
+      "note": "实现抛 Error→500",
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "SSRF-内网地址导入",
+      "method": "POST",
+      "url": "/projects/import/unified",
+      "status": 201,
+      "ms": 5,
+      "expect": [
+        200,
+        201,
+        400,
+        403
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"jobId\":\"c454135a-0153-4d90-8369-f2c520a50fad\"}"
+    },
+    {
+      "name": "SSRF-云元数据",
+      "method": "POST",
+      "url": "/projects/import/unified",
+      "status": 201,
+      "ms": 4,
+      "expect": [
+        200,
+        201,
+        400,
+        403
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"jobId\":\"ca477410-ef97-43a4-a0d4-9b19a27a0d7f\"}"
+    },
+    {
+      "name": "SSRF-非 http 协议",
+      "method": "POST",
+      "url": "/projects/import/unified",
+      "status": 201,
+      "ms": 3,
+      "expect": [
+        400,
+        200
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"jobId\":\"c1922666-dbca-4af8-8025-0602099d27be\"}"
+    },
+    {
+      "name": "导入-非法 source",
+      "method": "POST",
+      "url": "/projects/import/unified",
+      "status": 201,
+      "ms": 3,
+      "expect": [
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"jobId\":\"48e0714a-aa76-4fe7-86c2-11eb2b776acc\"}"
+    },
+    {
+      "name": "导入-缺 ref",
+      "method": "POST",
+      "url": "/projects/import/unified",
+      "status": 500,
+      "ms": 1,
+      "expect": [
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"statusCode\":500,\"message\":\"Internal server error\"}"
+    },
+    {
+      "name": "压缩包-ZIP Slip 探测(不存在)",
+      "method": "POST",
+      "url": "/projects/import/unified",
+      "status": 201,
+      "ms": 4,
+      "expect": [
+        200,
+        400,
+        500
+      ],
+      "note": null,
+      "error": null,
+      "snippet": "{\"jobId\":\"14689664-c787-46d6-a32b-7bb3e6b8418f\"}"
+    }
+  ]
+}

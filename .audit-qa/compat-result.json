@@ -1,0 +1,138 @@
+{
+  "env": {
+    "os": "win32 ",
+    "node": "v22.22.2",
+    "npm": "11.8.0",
+    "pnpm": "12.15.0",
+    "electron": null
+  },
+  "out": [
+    {
+      "case": "环境矩阵",
+      "os": "win32 ",
+      "node": "v22.22.2",
+      "npm": "11.8.0",
+      "pnpm": "12.15.0",
+      "electron": null
+    },
+    {
+      "case": "C1 中文+空格路径导入",
+      "jobStatus": "done",
+      "projectId": "4604a154-947a-430a-8ede-919bd1c9dd16",
+      "name": "中文 项目 测试",
+      "rootPath": "C:\\Users\\administer\\WorkBuddy\\DevPilot\\.audit-qa\\fixtures\\中文 项目 测试"
+    },
+    {
+      "case": "C1 中文路径启动",
+      "status": "Success",
+      "ms": 996,
+      "report": "启动成功（健康校验通过）：npm run dev，端口 4214"
+    },
+    {
+      "case": "C1 端口探活",
+      "response": "cn ok"
+    },
+    {
+      "case": "C1 工作区列中文路径",
+      "status": 200,
+      "entries": 2
+    },
+    {
+      "case": "C2 端口被占用时启动",
+      "status": "Success",
+      "ms": 135,
+      "occupierAlive": true,
+      "report": "启动成功（健康校验通过）（接管已在运行的实例）：npm run dev，端口 4215",
+      "steps": [
+        "未发现一键启动脚本，使用已确认的启动命令：npm run dev",
+        "第 1 次启动：npm run dev",
+        "启动成功（健康校验通过）（接管已在运行的实例）：npm run dev，端口 4215"
+      ]
+    },
+    {
+      "case": "C3 同项目 5 次并发启动",
+      "uniqueJobIds": 1,
+      "jobIds": [
+        "d37df2a5-d7f0-4be0-8344-822ea7cc64d4",
+        "d37df2a5-d7f0-4be0-8344-822ea7cc64d4",
+        "d37df2a5-d7f0-4be0-8344-822ea7cc64d4",
+        "d37df2a5-d7f0-4be0-8344-822ea7cc64d4",
+        "d37df2a5-d7f0-4be0-8344-822ea7cc64d4"
+      ],
+      "statuses": [
+        201,
+        201,
+        201,
+        201,
+        201
+      ]
+    },
+    {
+      "case": "C3 任务状态",
+      "jobId": "d37df2a5-d7f0-4be0-8344-822ea7cc64d4",
+      "status": "Success",
+      "attempt": 1
+    },
+    {
+      "case": "C4 启动命令不存在",
+      "status": "Failed",
+      "ms": 13638,
+      "report": "Agent 判断该项目无法通过自动修复解决：修复 Agent 调用失败：Error: all providers failed（尝试链：deepseek:TypeError: fetch failed | openai:no-key | moonshot:no-key | qwen:no-key | zhipu:no-key | custom:no-key）\n\n最近日志：\n（跳过全量探测）\n[2026-11-15T08:33:43.69",
+      "steps": [
+        {
+          "phase": "repair",
+          "msg": "第 1 次启动失败（Failed），抓取日志交给 Agent 修复"
+        },
+        {
+          "phase": "repair",
+          "msg": "Agent 诊断：修复 Agent 调用失败：Error: all providers failed（尝试链：deepseek:TypeError: fetch failed | "
+        },
+        {
+          "phase": "failed",
+          "msg": "Agent 判断该项目无法通过自动修复解决：修复 Agent 调用失败：Error: all providers failed（尝试链：deepseek:TypeError: fe"
+        }
+      ]
+    },
+    {
+      "case": "C5 超长路径创建",
+      "ok": true,
+      "len": 377
+    },
+    {
+      "case": "C5 超长路径导入",
+      "ok": true,
+      "jobStatus": "done",
+      "error": "",
+      "projectId": "8e700df5-8403-45e4-8e00-320a7b999896"
+    },
+    {
+      "case": "C6 读二进制文件(系统 node.exe)",
+      "status": 400,
+      "note": "预期 400（超出项目/大小限制）",
+      "snippet": "{\"message\":\"路径不在任何已注册项目内，拒绝访问：C:\\\\Users\\\\administer\\\\.workbuddy\\\\binaries\\\\node\\\\versions\\\\22.22.2-6"
+    },
+    {
+      "case": "C6 读 GBK 文件",
+      "status": 200,
+      "content": "\"����\\r\\n\"",
+      "note": "UTF-8 解码 GBK 会乱码"
+    },
+    {
+      "case": "C7 写只读文件",
+      "status": 201,
+      "body": "{\"ok\":false,\"error\":\"EPERM: operation not permitted, rename 'C:\\\\Users\\\\administer\\\\WorkBuddy\\\\DevPilot\\\\.audit-qa\\\\fixtures\\\\app-port\\\\readonly.txt.90f321e7-40",
+      "fileNow": "origin"
+    },
+    {
+      "case": "C8 写入 3MB 文件",
+      "writeStatus": 400,
+      "readStatus": 400,
+      "readSnippet": "{\"message\":\"路径不存在或不可访问：C:\\\\Users\\\\administer\\\\WorkBuddy\\\\DevPilot\\\\.audit-qa\\\\fixtures\\\\app-port\\\\bi"
+    },
+    {
+      "case": "C9 BOM+CRLF 读取",
+      "status": 200,
+      "content": "\"﻿line1\\r\\nline2\\r\\n\""
+    }
+  ]
+}
