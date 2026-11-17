@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ConfigProvider, Typography, Table, Button, Input, Space, Tag, Card,
-  Modal, message, List, Tabs, Descriptions, Select, Badge, Steps, Result, Checkbox,
+  Modal, message, List, Tabs, Descriptions, Select, Badge, Steps, Result, Checkbox, Popconfirm, Switch,
 } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { api, pickDirectory } from './api';
@@ -208,8 +208,20 @@ function Logs() {
 /* ---------- 审批中心 ---------- */
 function Approvals() {
   const [rows, setRows] = useState<any[]>([]);
-  const load = React.useCallback(async () => setRows(await api('/approvals')), []);
+  const [mode, setMode] = useState<'manual' | 'auto'>('manual');
+  const load = React.useCallback(async () => {
+    setRows(await api('/approvals'));
+    setMode((await api<{ mode: 'manual' | 'auto' }>('/permissions/mode')).mode);
+  }, []);
   useEffect(() => { void load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, [load]);
+
+  const switchMode = async (checked: boolean) => {
+    const next = checked ? 'auto' : 'manual';
+    const r = await api<{ mode: 'manual' | 'auto' }>('/permissions/mode', 'POST', { mode: next });
+    setMode(r.mode);
+    message.success(checked ? '已开启完全访问：全部操作自动批准' : '已恢复逐条审批');
+    void load();
+  };
 
   const [acting, setActing] = useState<string | null>(null);
   const highRisk = rows.filter((row) => row.risk_level === 'high').length;
@@ -233,7 +245,26 @@ function Approvals() {
         <MetricCard label="高风险" value={highRisk} hint="建议逐条确认" tone="amber" />
         <MetricCard label="中风险" value={mediumRisk} hint="涉及状态或文件写入" />
       </div>
-      <SectionCard title="审批队列">
+      <SectionCard
+        title="审批队列"
+        extra={
+          <Space size={10}>
+            <Typography.Text type={mode === 'auto' ? 'warning' : 'secondary'} style={{ fontSize: 12 }}>
+              {mode === 'auto' ? '完全访问：全部操作自动批准（含高危）' : '默认模式：操作需手动批准'}
+            </Typography.Text>
+            <Popconfirm
+              title={mode === 'manual' ? '开启完全访问？' : '恢复逐条审批？'}
+              description={mode === 'manual' ? '开启后 Agent 的全部工具操作（含高危命令、写文件、杀进程）将自动批准，不再弹审批。Agent 本地安全边界（系统目录写入保护等）仍然生效。' : '恢复后所有操作重新回到手动批准。'}
+              okText={mode === 'manual' ? '开启完全访问' : '恢复审批'}
+              cancelText="取消"
+              okButtonProps={mode === 'manual' ? { danger: true } : {}}
+              onConfirm={() => void switchMode(mode === 'manual')}
+            >
+              <Switch checked={mode === 'auto'} checkedChildren="完全访问" unCheckedChildren="手动批准" />
+            </Popconfirm>
+          </Space>
+        }
+      >
         <StateBlock loading={false} empty={rows.length === 0} emptyText="没有等待授权的操作">
           <Table rowKey="id" size="small" dataSource={rows}
             columns={[
@@ -253,6 +284,67 @@ function Approvals() {
         </StateBlock>
       </SectionCard>
     </Space>
+  );
+}
+
+/** 全局审批门：任意页面下有新审批就地弹窗确认（类 UAC 心智）。
+ *  简明模式下没有审批中心入口，这里是主要处置点；Agent 页面停留时不重复弹（页内已有横幅）。 */
+function GlobalApprovalGate({ suppress }: { suppress?: boolean }) {
+  const [pending, setPending] = useState<any>(null);
+  const [acting, setActing] = useState(false);
+  const dismissed = useRef<Set<string>>(new Set());
+  const load = React.useCallback(async () => {
+    try {
+      const rows = await api<any[]>('/approvals');
+      const first = (Array.isArray(rows) ? rows : []).find((r) => r.approval_status === 'pending' && !dismissed.current.has(r.id));
+      setPending(first ?? null);
+    } catch { /* 后端瞬时不可达静默 */ }
+  }, []);
+  useEffect(() => { void load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, [load]);
+  const act = async (approve: boolean) => {
+    if (!pending || acting) return;
+    setActing(true);
+    try {
+      await api(`/approvals/${pending.id}/${approve ? 'approve' : 'reject'}`, 'POST');
+      message.success(approve ? '已批准，Agent 将继续执行' : '已拒绝，Agent 会调整方案或终止任务');
+      dismissed.current.add(pending.id);
+      setPending(null);
+    } catch (e: any) { message.error('操作失败：' + (e?.message ?? String(e))); }
+    finally { setActing(false); }
+  };
+  const dismiss = () => { if (pending) dismissed.current.add(pending.id); setPending(null); };
+  const params = (() => { try { return pending?.param_json ? JSON.parse(pending.param_json) as Record<string, unknown> : null; } catch { return null; } })();
+  return (
+    <Modal
+      open={!!pending && !suppress}
+      title={<span><span aria-hidden>🔐</span> Agent 请求授权</span>}
+      width={520}
+      onCancel={dismiss}
+      footer={[
+        <Button key="ignore" type="text" onClick={dismiss}>暂不处理</Button>,
+        <Button key="reject" danger loading={acting} onClick={() => void act(false)}>拒绝</Button>,
+        <Button key="ok" type="primary" loading={acting} onClick={() => void act(true)}>批准本次</Button>,
+      ]}
+    >
+      {pending && (
+        <div style={{ display: 'grid', gap: 10 }}>
+          <div style={{ padding: '10px 12px', borderRadius: 9, background: 'var(--dp-subtle)', border: '1px solid var(--dp-border)' }}>
+            <Typography.Text strong>{pending.action_summary}</Typography.Text>
+            <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <Tag color={pending.risk_level === 'high' ? 'red' : pending.risk_level === 'medium' ? 'orange' : 'default'}>风险 {pending.risk_level}</Tag>
+              <Tag>{pending.requester}</Tag>
+              {(pending.risk_reasons ? JSON.parse(pending.risk_reasons) as string[] : []).slice(0, 3).map((reason) => <Tag key={reason} color="orange">{reason}</Tag>)}
+            </div>
+          </div>
+          {params && (
+            <div className="dp-agent-kv"><span>具体操作</span><strong title={pending.param_json}>{Object.entries(params).map(([k, v]) => `${k}=${String(v).slice(0, 80)}`).join('，').slice(0, 160)}</strong></div>
+          )}
+          <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: 0 }}>
+            「批准本次」仅授权这一条操作（一次性），Agent 完成后不会延续权限；拒绝后 Agent 会换方案或终止任务。
+          </Typography.Paragraph>
+        </div>
+      )}
+    </Modal>
   );
 }
 
@@ -366,8 +458,27 @@ function Settings({ rerunOnboarding }: { rerunOnboarding: () => void }) {
   };
 
   const current = st?.providers?.find((p: any) => p.active);
+  const [advanced, setAdvanced] = useState(() => { try { return localStorage.getItem('devpilot.advancedMode') === '1'; } catch { return false; } });
+  const toggleAdvanced = (on: boolean) => {
+    setAdvanced(on);
+    try { localStorage.setItem('devpilot.advancedMode', on ? '1' : '0'); } catch { /* noop */ }
+    window.dispatchEvent(new Event('devpilot:advanced-changed'));
+    message.success(on ? '已开启高级模式：完整功能页面全部可见' : '已切换到简明模式：只保留工作台 / Agent / 设置');
+  };
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
+      <Card size="small" title="界面模式">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+          <div>
+            <Typography.Text strong>高级模式</Typography.Text>
+            <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: '4px 0 0' }}>
+              关闭（推荐大多数用户）：侧边栏只保留工作台 / Agent / 设置，环境体检、依赖安装、日志诊断等全部由 Agent 在后台自动完成。
+              开启：显示全部功能页面（项目管理、日志与诊断、Git、审批中心、数据库与服务、配置中心、备份迁移、插件、工作流等）。
+            </Typography.Paragraph>
+          </div>
+          <Switch checked={advanced} checkedChildren="高级" unCheckedChildren="简明" onChange={toggleAdvanced}/>
+        </div>
+      </Card>
       <Card size="small" title="模型供应商">
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
           全部走 OpenAI 兼容协议，点击卡片上的「切换」自由更换当前模型，点「配置」填写 Key / 模型 / Base URL。
@@ -662,6 +773,11 @@ function GitCenter() {
 }
 
 /* ---------- 数据库与本地服务管理 ---------- */
+/* 会话级缓存：数据库与服务 / 外部工具页只在首次进入时加载一次，
+   之后用户点「刷新」按钮才重新探测（任务书反馈：不要每次进页面都自动探测） */
+let databasesCache: { conns: any[]; detected: any[]; services: any[] } | null = null;
+let externalToolsCache: any[] | null = null;
+
 function DatabasesCenter() {
   const [conns, setConns] = useState<any[]>([]);
   const [detected, setDetected] = useState<any[]>([]);
@@ -669,24 +785,33 @@ function DatabasesCenter() {
   const [form, setForm] = useState({ name: '', dbType: 'sqlite', host: '127.0.0.1', port: '3306', databaseName: '' });
   const [svcForm, setSvcForm] = useState({ name: '', serviceKind: 'custom', exePath: '', args: '', port: '' });
 
-  const load = React.useCallback(async () => {
-    setConns(await api('/databases/connections'));
-    setServices(await api('/local-services'));
-    setDetected(await api('/databases/detect'));
+  const load = React.useCallback(async (force = false) => {
+    if (!force && databasesCache) {
+      setConns(databasesCache.conns); setServices(databasesCache.services); setDetected(databasesCache.detected);
+      return;
+    }
+    const [c, s, d] = await Promise.all([
+      api<any[]>('/databases/connections'), api<any[]>('/local-services'), api<any[]>('/databases/detect'),
+    ]) as [any[], any[], any[]];
+    databasesCache = { conns: c, services: s, detected: d };
+    setConns(c); setServices(s); setDetected(d);
   }, []);
   useEffect(() => { void load(); }, [load]);
+
+  /** 页内写操作后必须拿最新数据：绕过缓存强制刷新 */
+  const reload = () => load(true);
 
   const addConn = async () => {
     if (!form.name.trim() || !form.databaseName.trim()) return message.warning('名称与 database 为必填');
     await api('/databases/connections', 'POST', { name: form.name, dbType: form.dbType, host: form.dbType === 'sqlite' ? undefined : form.host, port: form.dbType === 'sqlite' ? undefined : Number(form.port), databaseName: form.databaseName });
     message.success('连接已登记');
-    void load();
+    reload();
   };
 
   const testConn = async (id: string) => {
     const r = await api<{ ok: boolean; detail: string }>(`/databases/connections/${id}/test`, 'POST');
     r.ok ? message.success(r.detail) : message.error(r.detail);
-    void load();
+    reload();
   };
 
   const addSvc = async () => {
@@ -698,12 +823,12 @@ function DatabasesCenter() {
     });
     message.success('服务已登记');
     setSvcForm({ name: '', serviceKind: 'custom', exePath: '', args: '', port: '' });
-    void load();
+    reload();
   };
 
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
-      <Card size="small" title="本地数据服务探测（端口 + Windows 服务）" extra={<Button size="small" onClick={() => void load()}>刷新</Button>}>
+      <Card size="small" title="本地数据服务探测（端口 + Windows 服务）" extra={<Button size="small" onClick={() => void reload()}>刷新</Button>}>
         <Table rowKey="kind" size="small" pagination={false} dataSource={detected}
           columns={[
             { title: '服务', dataIndex: 'name' },
@@ -734,7 +859,7 @@ function DatabasesCenter() {
               title: '操作', render: (_, r) => (
                 <Space>
                   <Button size="small" onClick={() => void testConn(r.id)}>测试</Button>
-                  <Button size="small" danger onClick={() => confirmDelete('删除这条数据库连接？', '只移除 DevPilot 中的连接配置，不会删除远端数据库或其中的数据。', async () => { await api(`/databases/connections/${r.id}`, 'DELETE'); await load(); })}>删除</Button>
+                  <Button size="small" danger onClick={() => confirmDelete('删除这条数据库连接？', '只移除 DevPilot 中的连接配置，不会删除远端数据库或其中的数据。', async () => { await api(`/databases/connections/${r.id}`, 'DELETE'); reload(); })}>删除</Button>
                 </Space>
               ),
             },
@@ -758,10 +883,10 @@ function DatabasesCenter() {
             {
               title: '操作', render: (_, r) => (
                 <Space>
-                  <Button size="small" type="primary" onClick={async () => { const x = await api<any>(`/local-services/${r.id}/start`, 'POST'); x.ok ? message.success(`已启动 pid=${x.pid}`) : message.error(x.error); void load(); }}>启动</Button>
-                  <Button size="small" onClick={async () => { await api(`/local-services/${r.id}/check`, 'POST'); void load(); }}>检查</Button>
-                  <Button size="small" danger onClick={async () => { await api(`/local-services/${r.id}/stop`, 'POST'); void load(); }}>停止</Button>
-                  <Button size="small" danger onClick={() => confirmDelete('删除这个本地服务？', '会移除服务定义与启动配置。若进程仍在运行，请先停止再删除。', async () => { await api(`/local-services/${r.id}`, 'DELETE'); await load(); })}>删除</Button>
+                  <Button size="small" type="primary" onClick={async () => { const x = await api<any>(`/local-services/${r.id}/start`, 'POST'); x.ok ? message.success(`已启动 pid=${x.pid}`) : message.error(x.error); reload(); }}>启动</Button>
+                  <Button size="small" onClick={async () => { await api(`/local-services/${r.id}/check`, 'POST'); reload(); }}>检查</Button>
+                  <Button size="small" danger onClick={async () => { await api(`/local-services/${r.id}/stop`, 'POST'); reload(); }}>停止</Button>
+                  <Button size="small" danger onClick={() => confirmDelete('删除这个本地服务？', '会移除服务定义与启动配置。若进程仍在运行，请先停止再删除。', async () => { await api(`/local-services/${r.id}`, 'DELETE'); reload(); })}>删除</Button>
                 </Space>
               ),
             },
@@ -778,8 +903,14 @@ function ExternalToolsPage() {
   const [url, setUrl] = useState('');
   const [avds, setAvds] = useState<string[]>([]);
 
-  const load = React.useCallback(async () => setTools(await api('/external-tools')), []);
+  const load = React.useCallback(async (force = false) => {
+    if (!force && externalToolsCache) { setTools(externalToolsCache); return; }
+    const t = await api<any[]>('/external-tools');
+    externalToolsCache = t;
+    setTools(t);
+  }, []);
   useEffect(() => { void load(); }, [load]);
+  const reload = () => load(true);
 
   const openIde = async (toolId: string) => {
     if (!projectPath.trim()) return message.warning('先选择项目目录');
@@ -807,7 +938,7 @@ function ExternalToolsPage() {
 
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
-      <Card size="small" title="工具探测" extra={<Button size="small" onClick={() => void load()}>刷新</Button>}>
+      <Card size="small" title="工具探测" extra={<Button size="small" onClick={() => void reload()}>刷新</Button>}>
         <Table rowKey="id" size="small" pagination={false} dataSource={tools}
           columns={[
             { title: '工具', dataIndex: 'name' },
@@ -1117,13 +1248,41 @@ function NotificationCenterPage() {
   const [ruleName, setRuleName] = useState('');
   const [ruleType, setRuleType] = useState('*');
   const [rulePri, setRulePri] = useState<number>(5);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const load = React.useCallback(async () => {
-    setRows(await api('/notifications'));
+    const list = await api<any[]>('/notifications');
+    setRows(list);
     setUnread(await api('/notifications/unread-count'));
     setRules(await api('/notifications/rules'));
+    // 刷新后剔除已不存在的勾选（被别处删除/轮询清库），避免幽灵选择
+    setSelected((prev) => {
+      if (!prev.size) return prev;
+      const alive = new Set(list.map((n: any) => n.id));
+      const next = new Set([...prev].filter((id) => alive.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
   }, []);
   useEffect(() => { void load(); const t = setInterval(load, 4000); return () => clearInterval(t); }, [load]);
+
+  const toggleSelect = (id: string) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const clearSelection = () => setSelected(new Set());
+  const allSelected = rows.length > 0 && rows.every((n) => selected.has(n.id));
+
+  const deleteBatch = async () => {
+    if (!selected.size) return;
+    const ids = [...selected];
+    try {
+      const r = await api<{ deleted: number }>('/notifications/delete-batch', 'POST', { ids });
+      message.success(`已删除 ${r.deleted} 条通知`);
+      clearSelection();
+      await load();
+    } catch (e: any) { message.error('批量删除失败：' + String(e?.message ?? e)); }
+  };
 
   const createRule = async () => {
     if (!ruleName.trim()) return message.warning('请填写规则名称');
@@ -1142,10 +1301,25 @@ function NotificationCenterPage() {
           <Button size="small" onClick={async () => { await api('/notifications/read-all', 'POST'); void load(); }}>全部已读</Button>
           <Button size="small" onClick={() => void load()}>刷新</Button>
         </Space>}>
+        {rows.length > 0 && (
+          <div className="dp-notif-batch-bar">
+            <Checkbox
+              checked={allSelected}
+              indeterminate={selected.size > 0 && !allSelected}
+              onChange={(e) => setSelected(e.target.checked ? new Set(rows.map((n: any) => n.id)) : new Set())}
+            >全选</Checkbox>
+            <span className="dp-desc">已选 {selected.size} / {rows.length} 条</span>
+            <Popconfirm title={`删除选中的 ${selected.size} 条通知？`} description="删除后不可恢复。" okText="删除" cancelText="取消" okButtonProps={{ danger: true }} onConfirm={() => void deleteBatch()} disabled={!selected.size}>
+              <Button size="small" danger disabled={!selected.size} loading={false}>删除选中（{selected.size}）</Button>
+            </Popconfirm>
+            {selected.size > 0 && <Button size="small" type="text" onClick={clearSelection}>清除选择</Button>}
+          </div>
+        )}
         <List dataSource={rows} renderItem={(n: any) => (
           <List.Item actions={[
+            <Checkbox key="s" checked={selected.has(n.id)} onChange={() => toggleSelect(n.id)} onClick={(e) => e.stopPropagation()} />,
             !n.read && <Button key="r" size="small" onClick={async () => { await api(`/notifications/${n.id}/read`, 'POST'); void load(); }}>已读</Button>,
-            <Button key="d" size="small" danger onClick={async () => { await api(`/notifications/${n.id}`, 'DELETE'); void load(); }}>删除</Button>,
+            <Button key="d" size="small" danger onClick={async () => { await api(`/notifications/${n.id}`, 'DELETE'); setSelected((prev) => { const next = new Set(prev); next.delete(n.id); return next; }); void load(); }}>删除</Button>,
           ].filter(Boolean) as any}>
             <List.Item.Meta
               title={<Space>
@@ -1325,13 +1499,37 @@ function AgentsCenterPage() {
   const [projectId, setProjectId] = useState<string | undefined>();
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
+  const [approvalMode, setApprovalMode] = useState<'manual' | 'auto'>('manual');
+  const conversationRef = useRef<HTMLDivElement | null>(null);
+  const followBottom = useRef(true);
+
+  /** 执行时间线自动跟随：新步骤出现时滚到底部显示最新内容；
+   *  用户手动上翻查看历史时暂停跟随，滚回底部附近即恢复 */
+  const handleConversationScroll = () => {
+    const el = conversationRef.current;
+    if (!el) return;
+    followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+  };
+  useEffect(() => {
+    const el = conversationRef.current;
+    if (el && followBottom.current) el.scrollTop = el.scrollHeight;
+  });
+  // 切换会话：恢复跟随并定位到该会话的最新内容
+  useEffect(() => {
+    followBottom.current = true;
+    const el = conversationRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [selectedId]);
 
   const load = React.useCallback(async () => {
-    const [agentRows, taskRows, projectRows, approvalRows] = await Promise.all([
+    const [agentRows, taskRows, projectRows, approvalRows, modeRow] = await Promise.all([
       api<any[]>('/agents'), api<any[]>('/tasks'), api<any[]>('/projects'), api<any[]>('/approvals'),
+      api<{ mode: 'manual' | 'auto' }>('/permissions/mode'),
     ]);
     setAgents(agentRows); setProjects(projectRows); setApprovals(approvalRows);
     setTasks(taskRows);
+    setApprovalMode(modeRow.mode);
     if (!selectedId && taskRows.length) setSelectedId(taskRows[0].id);
   }, [selectedId]);
 
@@ -1340,8 +1538,8 @@ function AgentsCenterPage() {
     try { setDetail(await api(`/tasks/${selectedId}`)); } catch { setDetail(null); }
   }, [selectedId]);
 
-  useEffect(() => { void load(); const timer = setInterval(load, 8000); return () => clearInterval(timer); }, [load]);
-  useEffect(() => { void loadDetail(); const timer = setInterval(loadDetail, 4000); return () => clearInterval(timer); }, [loadDetail]);
+  useEffect(() => { void load(); const timer = setInterval(load, 4000); return () => clearInterval(timer); }, [load]);
+  useEffect(() => { void loadDetail(); const timer = setInterval(loadDetail, 2000); return () => clearInterval(timer); }, [loadDetail]);
   // 实时事件：任务状态变化 / 审批需求 → 立即刷新（WS，替代纯轮询）
   useDevPilotEvents(['task.status.changed', 'approval.required', 'tool.call.completed', 'task.progress'], () => {
     void load();
@@ -1356,14 +1554,45 @@ function AgentsCenterPage() {
       const id = created.id ?? created.taskId ?? created.task?.id;
       if (!id) throw new Error('后端未返回任务 ID');
       setGoal(''); setSelectedId(id);
-      message.success('Agent 任务已创建，可在执行区启动');
       await load();
+      // 一键直达：创建后立即交给 Supervisor 执行（审批会自动挂起等待用户处理）
+      try {
+        const run = await api<{ status?: string }>(`/tasks/${id}/run`, 'POST');
+        if (run?.status === 'WaitingApproval') message.info('任务需要审批：请在右侧「审批操作」中批准后自动继续');
+        else message.success('Agent 已开始执行');
+      } catch { message.info('任务已创建，点击「开始执行」启动'); }
+      void loadDetail();
     } catch (e: any) { message.error('创建失败：' + (e?.message ?? String(e))); }
     finally { setCreating(false); }
   };
 
-  const taskAction = async (action: 'run' | 'pause' | 'resume' | 'cancel') => {
-    if (!selectedId || busy) return;
+  const renameTask = async (taskId: string, title: string) => {    const clean = title.trim();
+    if (!clean) { message.warning('会话名称不能为空'); return; }
+    try {
+      await api(`/tasks/${taskId}/rename`, 'POST', { title: clean });
+      message.success('已重命名');
+      await load();
+      if (selectedId === taskId) void loadDetail();
+    } catch (e: any) { message.error('重命名失败：' + String(e?.message ?? e)); }
+  };
+
+  const deleteTask = async (taskId: string) => {    try {
+      const r = await api<{ deleted?: boolean; error?: string }>(`/tasks/${taskId}`, 'DELETE');
+      if (r?.deleted) {
+        message.success('会话已删除');
+        if (selectedId === taskId) { setSelectedId(null); setDetail(null); }
+        await load();
+      } else {
+        message.warning(r?.error ?? '删除失败');
+      }
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (msg.includes('执行中')) message.warning('任务正在执行中：请先取消，再删除会话');
+      else message.error('删除失败：' + msg);
+    }
+  };
+
+  const taskAction = async (action: 'run' | 'pause' | 'resume' | 'cancel') => {    if (!selectedId || busy) return;
     setBusy(true);
     try {
       await api(`/tasks/${selectedId}/${action}`, 'POST');
@@ -1399,10 +1628,22 @@ function AgentsCenterPage() {
         <aside className="dp-agent-sidebar">
           <div className="dp-agent-pane-title"><span>任务会话</span><span>{tasks.length}</span></div>
           {tasks.map((task) => (
-            <button key={task.id} className={`dp-agent-session${selectedId === task.id ? ' active' : ''}`} onClick={() => setSelectedId(task.id)}>
-              <span className="dp-agent-session-title">{task.input_summary || '未命名任务'}</span>
+            <div key={task.id} role="button" tabIndex={0} className={`dp-agent-session${selectedId === task.id ? ' active' : ''}`} onClick={() => setSelectedId(task.id)} onDoubleClick={() => setRenaming({ id: task.id, title: task.input_summary ?? '' })} onKeyDown={(e) => { if (e.key === 'Enter') setSelectedId(task.id); }}>
+              <span className="dp-agent-session-title" title={`${task.input_summary || '未命名任务'}（双击重命名）`}>{task.input_summary || '未命名任务'}</span>
               <span className="dp-agent-session-meta"><span>{task.status}</span><span>{formatTime(task.created_at)}</span></span>
-            </button>
+              <button className="dp-agent-session-rename" title="重命名" aria-label="重命名任务会话" onClick={(event) => { event.stopPropagation(); setRenaming({ id: task.id, title: task.input_summary ?? '' }); }}>✎</button>
+              <Popconfirm
+                title="删除该任务会话？"
+                description="将同时清除其执行记录、计划版本与记忆沉淀。"
+                okText="删除" cancelText="取消" okButtonProps={{ danger: true }}
+                onConfirm={() => void deleteTask(task.id)}
+              >
+                <button
+                  className="dp-agent-session-delete" title="删除会话" aria-label="删除任务会话"
+                  onClick={(event) => event.stopPropagation()}
+                >✕</button>
+              </Popconfirm>
+            </div>
           ))}
           {tasks.length === 0 && <div className="dp-state-empty"><div className="dp-state-title">暂无会话</div><p className="dp-desc">在右侧输入目标开始</p></div>}
           <div className="dp-agent-pane-title"><span>常用 Agent</span><span>{agents.length}</span></div>
@@ -1410,20 +1651,57 @@ function AgentsCenterPage() {
         </aside>
 
         <main className="dp-agent-main">
-          {selected ? <div className="dp-agent-conversation">
-            <div className="dp-agent-task-head">
+          {selected ? <div className="dp-agent-conversation" ref={conversationRef} onScroll={handleConversationScroll}>
+            {approvalMode === 'auto' && (
+              <div className="dp-agent-approval-banner" style={{ borderColor: 'var(--dp-warning)', marginBottom: 14 }}>
+                <div><strong>完全访问已开启</strong><p className="dp-desc">全部工具操作（含高危）自动批准，不弹审批。到「审批中心」关闭可恢复逐条审批。</p></div>
+                <Button size="small" onClick={() => { window.location.hash = '#/7'; }}>前往审批中心</Button>
+              </div>
+            )}
+            {/* 用户气泡：任务目标（对话流起点） */}
+            <div className="dp-chat-user">
+              <div className="dp-chat-bubble-user">
+                <p className="dp-chat-text">{selected.input_summary}</p>
+                <span className="dp-chat-meta">{formatTime(selected.created_at)} · 任务 {String(selected.id).slice(0, 8)}</span>
+              </div>
+            </div>
+            {/* 会话操作工具条（紧凑，不占对话主体） */}
+            <div className="dp-chat-toolbar">
               <StatusTag status={selected.status}/>
-              <h3>{selected.input_summary}</h3>
-              <p>任务 {String(selected.id).slice(0, 8)} · 创建于 {formatTime(selected.created_at)}</p>
-              <Space size={6} style={{ marginTop: 14 }} wrap>
+              <Space size={4} wrap>
                 {['Pending', 'WaitingInput'].includes(selected.status) && <Button type="primary" size="small" loading={busy} onClick={() => void taskAction('run')}>开始执行</Button>}
                 {['Running', 'Preparing'].includes(selected.status) && <Button size="small" loading={busy} onClick={() => void taskAction('pause')}>暂停</Button>}
                 {selected.status === 'Paused' && <Button type="primary" size="small" loading={busy} onClick={() => void taskAction('resume')}>恢复执行</Button>}
-                {['Pending', 'Preparing', 'Running', 'Paused', 'WaitingApproval', 'WaitingInput'].includes(selected.status) && <Button danger size="small" loading={busy} onClick={() => void taskAction('cancel')}>取消任务</Button>}
+                {['Pending', 'Preparing', 'Running', 'Paused', 'WaitingApproval', 'WaitingInput'].includes(selected.status) && <Button danger size="small" loading={busy} onClick={() => void taskAction('cancel')}>取消</Button>}
+                {!['Preparing', 'Running'].includes(selected.status) && (
+                  <Popconfirm title="删除该任务会话？" description="将同时清除其执行记录、计划版本与记忆沉淀。" okText="删除" cancelText="取消" okButtonProps={{ danger: true }} onConfirm={() => void deleteTask(selected.id)}>
+                    <Button danger size="small" type="text">删除</Button>
+                  </Popconfirm>
+                )}
+                <Button size="small" type="text" onClick={() => setRenaming({ id: selected.id, title: selected.input_summary ?? '' })}>重命名</Button>
               </Space>
             </div>
-            <div className="dp-agent-timeline">
-              <div className="dp-agent-pane-title" style={{ padding: '0 0 10px' }}><span>规划与执行进度</span><span>{subtasks.length} 次工具调用</span></div>
+            {selected.status === 'WaitingApproval' && approvalMode === 'manual' && (
+              <div className="dp-agent-approval-banner" style={{ marginTop: 14 }}>
+                <div>
+                  <strong>任务已挂起：有操作等待你的审批</strong>
+                  <p className="dp-desc">批准后任务自动从挂起点恢复执行；拒绝则 Agent 会调整方案或终止任务。</p>
+                </div>
+                <Space size={6}>
+                  {approvals.slice(0, 2).map((approval) => <span key={approval.id}><Button size="small" type="primary" onClick={() => void actApproval(approval.id, true)}>批准</Button><Button size="small" danger style={{ marginLeft: 6 }} onClick={() => void actApproval(approval.id, false)}>拒绝</Button></span>)}
+                  {approvals.length === 0 && <Button size="small" onClick={() => { window.location.hash = '#/7'; }}>前往审批中心</Button>}
+                </Space>
+              </div>
+            )}
+            {/* Agent 回应块：执行过程 + 结果（对话流助手侧） */}
+            <div className="dp-chat-assistant">
+              <div className="dp-chat-agent-row">
+                <span className="dp-chat-avatar" aria-hidden>AI</span>
+                <span className="dp-chat-agent-name">DevPilot Agent</span>
+                <span className="dp-chat-agent-sub">规划与执行 · {subtasks.length} 次工具调用 · 计划 v{selected.plan_version ?? 1}</span>
+              </div>
+              <div className="dp-agent-timeline">
+              <div className="dp-agent-pane-title" style={{ padding: '0 0 10px' }}><span>工具调用明细</span><span>{subtasks.length} 次</span></div>
               {subtasks.map((subtask, index) => {
                 // 结构化工具卡片：tool + note + params 摘要 + 真实结果（exitCode/错误），不再是裸 JSON
                 const input = parseJson(subtask.input_json) ?? {};
@@ -1461,15 +1739,39 @@ function AgentsCenterPage() {
                   ))}
                 </div>
               )}
-              {selected.result_summary && <div className="dp-agent-step"><div className="dp-agent-step-head"><span className="dp-agent-step-title">任务结果与验证</span><StatusTag status={selected.status}/></div><pre>{selected.result_summary}</pre></div>}
+              {(() => {
+                // 结构化结果：把 [validation=X toolCalls=N planVersions=M] 拆成徽标，正文干净可读
+                const raw = selected.result_summary ?? '';
+                const m = raw.match(/\s*\[validation=(\w+)\s+toolCalls=(\d+)\s+planVersions=(\d+)\]\s*$/);
+                const validation = m ? m[1] : null;
+                const toolCalls = m ? Number(m[2]) : null;
+                const planVersions = m ? Number(m[3]) : null;
+                const body = (m ? raw.slice(0, m.index) : raw).trim();
+                const tone = validation === 'PASSED' ? 'success' : validation === 'PARTIAL' ? 'warning' : validation === 'FAILED' || validation === 'BLOCKED' ? 'error' : 'default';
+                if (!body && !validation) return null;
+                return (
+                  <div className={`dp-agent-result ${tone}`}>
+                    <div className="dp-agent-result-head">
+                      <span className="dp-agent-step-title">任务结果与验证</span>
+                      <Space size={6}>
+                        {validation && <Tag color={tone === 'default' ? undefined : tone}>{validation === 'PASSED' ? '验证通过' : validation === 'PARTIAL' ? '部分完成' : validation === 'FAILED' ? '验证失败' : validation === 'BLOCKED' ? '已挂起' : validation}</Tag>}
+                        {toolCalls !== null && <Tag>工具 {toolCalls} 次</Tag>}
+                        {planVersions !== null && <Tag>计划 v{planVersions}</Tag>}
+                      </Space>
+                    </div>
+                    {body && <p className="dp-agent-result-body">{body}</p>}
+                  </div>
+                );
+              })()}
+              </div>
             </div>
           </div> : <div className="dp-agent-empty"><div><div className="dp-agent-empty-mark">AI</div><Typography.Title level={4}>从一个明确目标开始</Typography.Title><p className="dp-desc">选择项目并描述任务。Supervisor 会规划步骤，执行记录将在这里呈现。</p></div></div>}
           <div className="dp-agent-composer">
             <Space.Compact style={{ width: '100%', marginBottom: 8 }}>
               <Select allowClear placeholder="关联项目（可选）" style={{ width: '100%' }} value={projectId} onChange={setProjectId} options={projects.map((project) => ({ value: project.id, label: project.name }))}/>
             </Space.Compact>
-            <Input.TextArea rows={3} value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="描述希望 Agent 完成的任务，例如：分析当前项目的启动失败原因并给出修复方案…"/>
-            <div className="dp-agent-composer-note"><span>创建后由你确认开始执行</span><Button type="primary" size="small" loading={creating} disabled={!goal.trim()} onClick={() => void createTask()}>新建任务会话</Button></div>
+            <Input.TextArea rows={3} value={goal} onChange={(event) => setGoal(event.target.value)} onPressEnter={(event) => { if ((event.ctrlKey || event.metaKey) && goal.trim()) void createTask(); }} placeholder="描述希望 Agent 完成的任务，例如：帮我把这个项目运行起来 / 杀掉占用 8080 端口的进程…（Ctrl+Enter 直接发送执行）"/>
+            <div className="dp-agent-composer-note"><span>发送后 Agent 自动规划执行；高危操作会在此请求你的审批</span><Button type="primary" size="small" loading={creating} disabled={!goal.trim()} onClick={() => void createTask()}>发送并执行</Button></div>
           </div>
         </main>
 
@@ -1496,6 +1798,22 @@ function AgentsCenterPage() {
           <div style={{ padding: '0 12px 16px' }}>{agents.map((agent) => <div className="dp-agent-detail-block" style={{ margin: '0 0 8px' }} key={agent.id}><h4>{agent.name} <Tag>{agent.version}</Tag></h4><div>{capabilities(agent).map((capability) => <Tag key={capability}>{capability}</Tag>)}</div></div>)}</div>
         </aside>
       </div>
+      <Modal
+        title="重命名任务会话"
+        open={!!renaming}
+        okText="保存" cancelText="取消"
+        onOk={async () => { if (renaming) { await renameTask(renaming.id, renaming.title); setRenaming(null); } }}
+        onCancel={() => setRenaming(null)}
+      >
+        <Input
+          value={renaming?.title ?? ''}
+          maxLength={120}
+          autoFocus
+          placeholder="会话名称"
+          onChange={(e) => setRenaming((prev) => (prev ? { ...prev, title: e.target.value } : prev))}
+          onPressEnter={async () => { if (renaming) { await renameTask(renaming.id, renaming.title); setRenaming(null); } }}
+        />
+      </Modal>
     </div>
   );
 }
@@ -1926,7 +2244,7 @@ export default function App() {
   }
   return (
     <ConfigProvider locale={zhCN} theme={theme}>
-      <Shell page={page} onNavigate={navigate} themeMode={themeMode} onThemeChange={setMode}>{render()}</Shell>
+      <Shell page={page} onNavigate={navigate} themeMode={themeMode} onThemeChange={setMode}>{render()}<GlobalApprovalGate suppress={page === '7'} /></Shell>
     </ConfigProvider>
   );
 }

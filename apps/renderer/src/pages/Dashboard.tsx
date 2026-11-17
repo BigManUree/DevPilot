@@ -117,6 +117,10 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
   const [favorites, setFavorites] = useState<string[]>(() => readList('devpilot.projectFavorites'));
   const [recents, setRecents] = useState<string[]>(() => readList('devpilot.projectRecents'));
   const [gitInfo, setGitInfo] = useState<Record<string, { branch?: string; changes?: number }>>({});
+  // 项目自定义图标：projectId → data URL（null/缺省 = 用默认字母头像）
+  const [icons, setIcons] = useState<Record<string, string | null>>({});
+  const iconInputRef = useRef<HTMLInputElement | null>(null);
+  const iconPickTarget = useRef<string | null>(null);
   const auto = useAutoStart();
   const git = useGitImport();
   const [importTab, setImportTab] = useState('local');
@@ -129,6 +133,11 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
     try {
       const result = await api<any[]>('/projects');
       setProjects(Array.isArray(result) ? result : []);
+      // 首屏「可用」时刻：项目列表真正有数据（骨架被真实内容替换）。启动计时用，只报一次。
+      try {
+        const dp = (window as unknown as { devpilot?: { startupMark?: (m: string) => Promise<void> } }).devpilot;
+        void dp?.startupMark?.('dashboardReady');
+      } catch { /* 计时失败忽略 */ }
     } catch (e: any) { setError(e?.message ?? String(e)); }
     finally { setLoading(false); }
   }, []);
@@ -143,6 +152,87 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
   }, []);
 
   useEffect(() => { void load(); const timer = setInterval(load, 8000); return () => clearInterval(timer); }, [load]);
+
+  // 详情抽屉打开期间轮询刷新（4s）：服务状态/运行数变化时头部按钮与服务表实时跟上，
+  // 覆盖「从 Agent/别处启动或停止后抽屉状态滞留」的场景；仅同 id 时回写，避免竞态覆盖。
+  useEffect(() => {
+    const id = detail?.project?.id;
+    if (!id) return;
+    const timer = setInterval(async () => {
+      try {
+        const fresh = await api<any>(`/projects/${id}`);
+        setDetail((current: any) => (current?.project?.id === id ? fresh : current));
+      } catch { /* 后端瞬时不可达时保持现状 */ }
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [detail?.project?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 拉取项目图标（仅带 icon_path 的项目；新出现的项目补拉一次）
+  useEffect(() => {
+    for (const p of projects) {
+      if (!p.icon_path || icons[p.id] !== undefined) continue;
+      void api<{ dataUrl: string | null }>(`/projects/${p.id}/icon`).then((r) => {
+        setIcons((prev) => ({ ...prev, [p.id]: r.dataUrl }));
+      }).catch(() => { /* 图标读不到就保持字母头像 */ });
+    }
+  }, [projects]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** 点击图标：已有图标 → 管理弹窗（更换/恢复默认）；没有 → 直接选文件 */
+  const openIconPicker = (projectId: string, projectName: string, hasIcon: boolean) => {
+    if (!hasIcon) {
+      iconPickTarget.current = projectId;
+      iconInputRef.current?.click();
+      return;
+    }
+    Modal.confirm({
+      title: `项目图标：${projectName}`,
+      content: '可更换为本地图片，或恢复默认字母图标。',
+      okText: '更换图片',
+      cancelText: '恢复默认',
+      onOk: () => { iconPickTarget.current = projectId; iconInputRef.current?.click(); },
+      onCancel: async () => {
+        try {
+          await api(`/projects/${projectId}/icon`, 'DELETE');
+          setIcons((prev) => ({ ...prev, [projectId]: null }));
+          message.success('已恢复默认字母图标');
+        } catch (e: any) { message.error('恢复失败：' + (e?.message ?? String(e))); }
+      },
+    });
+  };
+
+  /** 本地选择图片 → 缩到 ≤256×256 再 base64 上传（图标不需要原图体积；
+   *  缩图同时规避大文件：2MB 原图 base64 后约 2.7MB，容易被请求体限制拒掉） */
+  const onIconFile = async (file: File) => {
+    const projectId = iconPickTarget.current;
+    if (!projectId || !file) return;
+    if (file.size > 20 * 1024 * 1024) { message.warning('图片过大（>20MB），请先压缩后再选择'); return; }
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+        img.onload = () => {
+          URL.revokeObjectURL(url);
+          const MAX = 256;
+          const scale = Math.min(1, MAX / Math.max(img.width, img.height));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) { reject(new Error('canvas 不可用')); return; }
+          ctx.drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL('image/png'));
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片解码失败')); };
+        img.src = url;
+      });
+      const base64 = dataUrl.split(',')[1] ?? '';
+      if (!base64) throw new Error('缩图结果为空');
+      await api(`/projects/${projectId}/icon`, 'POST', { dataBase64: base64, fileName: 'icon.png' });
+      setIcons((prev) => ({ ...prev, [projectId]: dataUrl }));
+      message.success('项目图标已更新');
+    } catch (e: any) { message.error('设置图标失败：' + (e?.message ?? String(e))); }
+  };
   useEffect(() => {
     if (variant !== 'dashboard') return;
     void loadActivity();
@@ -271,7 +361,66 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
     try { await fn(); } catch (e: any) { message.error(e?.message ?? String(e)); }
     finally { mark(key, false); }
   };
-  const startProject = (id: string, name: string) => void auto.run(id, name);
+  // ============ 配置向导：启动前收集缺失参数 → 验证 → 写回 .env → 启动 ============
+  const [wizard, setWizard] = useState<{
+    projectId: string; projectName: string;
+    fields: Array<{ key: string; sensitive: boolean; component?: string }>;
+    values: Record<string, string>;
+    invalid: Record<string, string>; // key → 失败原因（后端校验未通过的实时反馈）
+    busy: boolean;
+  } | null>(null);
+
+  const startProject = async (id: string, name: string) => {
+    // 先检测项目需要哪些必填配置（API Key / 数据库密码等）：缺失 → 弹配置向导收集并验证，全部可用后才启动
+    try {
+      const vars = await api<any>(`/environments/env-vars/${id}`);
+      const missing = (vars.vars ?? []).filter((v: any) => v.status === 'missing');
+      if (missing.length) {
+        setWizard({
+          projectId: id, projectName: name,
+          fields: missing.map((v: any) => ({ key: v.key, sensitive: !!v.sensitive, component: v.component })),
+          values: {}, invalid: {}, busy: false,
+        });
+        return; // 向导确认后才真正启动
+      }
+    } catch { /* env-vars 读不到（无档案）则直接走启动 */ }
+    auto.run(id, name);
+  };
+
+  /** 向导提交：写回 .env 并验证；有未通过项则留在弹窗并展示原因，全部通过 → 启动项目 */
+  const submitWizard = async () => {
+    if (!wizard) return;
+    setWizard((w) => (w ? { ...w, busy: true, invalid: {} } : w));
+    try {
+      const r = await api<{ ok: boolean; invalid: Array<{ key: string; reason: string }>; remaining: Array<{ key: string }> }>(
+        `/environments/env-config/${wizard.projectId}`, 'POST', { values: wizard.values },
+      );
+      if (r.invalid?.length) {
+        const reasons: Record<string, string> = {};
+        for (const item of r.invalid) reasons[item.key] = item.reason;
+        setWizard((w) => (w ? { ...w, busy: false, invalid: reasons } : w));
+        message.warning('部分参数校验未通过（见红字提示），请修正后重试');
+        return;
+      }
+      if (r.remaining?.length) {
+        // 一次没填全（或后端检测到新的缺失）→ 补充字段继续收集
+        const vars = await api<any>(`/environments/env-vars/${wizard.projectId}`);
+        const missing = (vars.vars ?? []).filter((v: any) => v.status === 'missing');
+        if (missing.length) {
+          setWizard((w) => (w ? { ...w, busy: false, fields: missing.map((v: any) => ({ key: v.key, sensitive: !!v.sensitive, component: v.component })), values: {}, invalid: {} } : w));
+          message.info(`还有 ${missing.length} 项必填配置需要填写`);
+          return;
+        }
+      }
+      message.success('配置已保存并验证通过，正在启动项目…');
+      setWizard(null);
+      auto.run(wizard.projectId, wizard.projectName);
+    } catch (e: any) {
+      setWizard((w) => (w ? { ...w, busy: false } : w));
+      message.error('配置保存失败：' + (e?.message ?? String(e)));
+    }
+  };
+
   const startingProject = (id: string) => auto.isStarting(id);
   /** CLI 型项目没有常驻服务：启动 = 打开命令行窗口并自动运行程序 */
   const openTerminal = (serviceId: string, name?: string) => act(`term-${serviceId}`, async () => {
@@ -286,10 +435,19 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
     void auto.run(project.id, project.name);
   });
   const stopProject = (id: string) => act(`stop-${id}`, async () => {
-    await api(`/projects/${id}/stop`, 'POST');
-    message.success('项目已停止');
-    await load();
-    if (detail) await openDetail(id);
+    // 乐观更新：点击即把卡片/详情切成「已停止」，不等接口返回（后端并行停止后由刷新校正真实状态）
+    setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, running_count: 0 } : p)));
+    setDetail((d: any) => (d?.project?.id === id
+      ? { ...d, project: { ...d.project, running_count: 0 }, services: (d.services ?? []).map((s: any) => (s.status === 'Running' || s.status === 'Starting' ? { ...s, status: 'Stopped' } : s)) }
+      : d));
+    try {
+      await api(`/projects/${id}/stop`, 'POST');
+      message.success('项目已停止');
+    } finally {
+      // 刷新不阻塞按钮解除 loading：停止结果已落库，后台校验即可
+      void load();
+      if (detail) void openDetail(id);
+    }
   });
   const confirmProject = (id: string) => act(`confirm-${id}`, async () => {
     await api(`/projects/${id}/confirm`, 'POST');
@@ -346,7 +504,16 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
       {rows.map((project) => (
         <article className="dp-project-card" key={project.id} onClick={() => void openDetail(project.id)}>
           <div className="dp-project-card-top">
-            <div className="dp-project-glyph">{String(project.name ?? '?').slice(0, 1)}</div>
+            <div
+              className={`dp-project-glyph dp-project-glyph-btn${icons[project.id] ? ' has-icon' : ''}`}
+              title={icons[project.id] ? '更换或恢复默认图标' : '设置项目图标（本地图片）'}
+              onClick={(event) => { event.stopPropagation(); openIconPicker(project.id, project.name, !!icons[project.id]); }}
+            >
+              {icons[project.id]
+                ? <img className="dp-project-icon-img" src={icons[project.id] ?? undefined} alt="" draggable={false}/>
+                : String(project.name ?? '?').slice(0, 1)}
+              <span className="dp-project-glyph-edit" aria-hidden>✎</span>
+            </div>
             <div className="dp-project-title"><strong>{project.name}</strong><small>{[project.language, project.framework].filter(Boolean).join(' · ') || '技术栈待识别'}</small></div>
             <button className={`dp-project-star${favorites.includes(project.id) ? ' active' : ''}`} title={favorites.includes(project.id) ? '取消收藏' : '收藏项目'} onClick={(event) => { event.stopPropagation(); toggleFavorite(project.id); }}><SmallIcon name="star"/></button>
           </div>
@@ -362,9 +529,11 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
             <div className="dp-project-actions" onClick={(event) => event.stopPropagation()}>
               {anyRunning(project)
                 ? <Button size="small" loading={busy(`stop-${project.id}`)} onClick={() => void stopProject(project.id)}>停止</Button>
-                : project.cli_service_id
+                : startingProject(project.id)
+                  ? <Button size="small" danger onClick={() => void auto.cancelForProject(project.id)}>停止启动</Button>
+                  : project.cli_service_id
                   ? <Button size="small" type="primary" loading={busy(`term-${project.cli_service_id}`)} onClick={() => openTerminal(project.cli_service_id, project.name)}>{busy(`term-${project.cli_service_id}`) ? '打开中' : '打开终端'}</Button>
-                  : <Button size="small" type="primary" icon={<SmallIcon name="play"/>} loading={startingProject(project.id)} onClick={() => startProject(project.id, project.name)}>{startingProject(project.id) ? '启动中' : '启动'}</Button>}
+                  : <Button size="small" type="primary" icon={<SmallIcon name="play"/>} onClick={() => startProject(project.id, project.name)}>启动</Button>}
               <Button size="small" onClick={() => void openDetail(project.id)}>详情</Button>
             </div>
           </div>
@@ -377,7 +546,22 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
     <Table rowKey="id" size="small" dataSource={rows} pagination={dashboard ? false : { pageSize: 12, hideOnSinglePage: true }} scroll={{ x: dashboard ? 680 : 980 }}
       onRow={(record) => ({ onClick: () => void openDetail(record.id), style: { cursor: 'pointer' } })}
       columns={[
-        { title: '项目', dataIndex: 'name', render: (value: string, record: any) => <Space size={9}><span className="dp-project-glyph" style={{ width: 28, height: 28, borderRadius: 7, fontSize: 11 }}>{String(value).slice(0, 1)}</span><span><Typography.Text strong>{value}</Typography.Text><div className="dp-desc">{[record.language, record.framework].filter(Boolean).join(' / ') || '待识别'}</div></span></Space> },
+        { title: '项目', dataIndex: 'name', render: (value: string, record: any) => (
+          <Space size={9}>
+            <span
+              className={`dp-project-glyph dp-project-glyph-btn${icons[record.id] ? ' has-icon' : ''}`}
+              style={{ width: 28, height: 28, borderRadius: 7, fontSize: 11 }}
+              title={icons[record.id] ? '更换或恢复默认图标' : '设置项目图标'}
+              onClick={(event) => { event.stopPropagation(); openIconPicker(record.id, value, !!icons[record.id]); }}
+            >
+              {icons[record.id]
+                ? <img className="dp-project-icon-img" src={icons[record.id] ?? undefined} alt="" draggable={false}/>
+                : String(value).slice(0, 1)}
+              <span className="dp-project-glyph-edit" aria-hidden>✎</span>
+            </span>
+            <span><Typography.Text strong>{value}</Typography.Text><div className="dp-desc">{[record.language, record.framework].filter(Boolean).join(' / ') || '待识别'}</div></span>
+          </Space>
+        ) },
         { title: '状态', width: 110, render: (_, record) => <StatusTag status={anyRunning(record) ? 'Running' : startingProject(record.id) ? 'Starting' : 'Stopped'} text={anyRunning(record) ? `运行中 ${record.running_count}` : startingProject(record.id) ? '启动中…' : '已停止'}/> },
         { title: 'Git 分支', width: 130, render: (_, record) => <BranchTag branch={gitInfo[record.id]?.branch}/> },
         { title: '服务', dataIndex: 'service_count', width: 65, render: (value) => value ?? 0 },
@@ -389,9 +573,11 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
           <Space size={4} onClick={(event) => event.stopPropagation()}>
             {anyRunning(record)
               ? <Button size="small" loading={busy(`stop-${record.id}`)} onClick={() => void stopProject(record.id)}>停止</Button>
-              : record.cli_service_id
+              : startingProject(record.id)
+                ? <Button size="small" danger onClick={() => void auto.cancelForProject(record.id)}>停止启动</Button>
+                : record.cli_service_id
                 ? <Button size="small" type="primary" loading={busy(`term-${record.cli_service_id}`)} onClick={() => openTerminal(record.cli_service_id, record.name)}>{busy(`term-${record.cli_service_id}`) ? '打开中' : '打开终端'}</Button>
-                : <Button size="small" type="primary" loading={startingProject(record.id)} onClick={() => startProject(record.id, record.name)}>{startingProject(record.id) ? '启动中' : '启动'}</Button>}
+                : <Button size="small" type="primary" onClick={() => startProject(record.id, record.name)}>启动</Button>}
             <Button size="small" onClick={() => void openDetail(record.id)}>详情</Button>
             {!dashboard && <Dropdown menu={{ items: [
                 { key: 'favorite', label: favorites.includes(record.id) ? '取消收藏' : '收藏项目' },
@@ -410,6 +596,9 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
 
   const detailServices: any[] = detail?.services ?? [];
   const runningServices = detailServices.filter((service) => service.status === 'Running' && service.port);
+  // 抽屉头部的运行判定以 services 实时状态为准（详情接口的 running_count 现已同源，这里双保险）
+  const detailRunningCount = detailServices.filter((service) => service.status === 'Running').length;
+  const detailAnyRunning = detailRunningCount > 0;
   const importPanel = (
     <SectionCard title="导入项目" className="dp-import-card">
       <Tabs size="small" activeKey={importTab} onChange={setImportTab} items={[
@@ -435,6 +624,15 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
 
   return (
     <div>
+      {/* 项目图标本地图片选择（隐藏；点击卡片/列表图标触发） */}
+      <input
+        ref={iconInputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/svg+xml" style={{ display: 'none' }}
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = ''; // 允许连续选择同一文件
+          if (file) void onIconFile(file);
+        }}
+      />
       <PageHeader
         eyebrow={variant === 'dashboard' ? 'Developer workspace' : 'Project portfolio'}
         title={variant === 'dashboard' ? '工作台' : '项目管理'}
@@ -510,13 +708,13 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
           <Space>
             {startingProject(detail.project.id)
               ? <Button size="small" loading>启动中</Button>
-              : anyRunning(detail.project)
+              : detailAnyRunning
                 ? <Button size="small" loading={busy(`restart-${detail.project.id}`)} onClick={() => void restartProject(detail.project)}>重启项目</Button>
                 : detailServices.length > 0 && detailServices.every((s) => s.service_type === 'cli')
                   ? <Button size="small" type="primary" loading={busy(`term-${detailServices[0].id}`)} onClick={() => openTerminal(detailServices[0].id, detail.project.name)}>打开终端</Button>
                   : <Button size="small" type="primary" onClick={() => startProject(detail.project.id, detail.project.name)}>启动项目</Button>}
             {!(detailServices.length > 0 && detailServices.every((s) => s.service_type === 'cli')) && (
-              <Button size="small" loading={busy(`stop-${detail.project.id}`)} disabled={!anyRunning(detail.project)} onClick={() => void stopProject(detail.project.id)}>停止</Button>
+              <Button size="small" loading={busy(`stop-${detail.project.id}`)} disabled={!detailAnyRunning} onClick={() => void stopProject(detail.project.id)}>停止</Button>
             )}
           </Space>
         )}
@@ -591,11 +789,133 @@ export default function Dashboard({ selectedId, onSelect, variant = 'dashboard' 
             { key: 'configs', label: `配置草案（${detail.configs?.length ?? 0}）`, children: <><p className="dp-desc">草案来自项目结构识别，确认后才作为启动依据。</p><Table rowKey="id" size="small" dataSource={detail.configs} pagination={false} columns={[{ title: '类型', dataIndex: 'config_type' }, { title: '来源', dataIndex: 'source' }, { title: '内容', dataIndex: 'content_ref', ellipsis: true }]}/></> },
             { key: 'profile', label: '组件树', children: <ProfilePanel projectId={detail.project.id}/> },
             { key: 'health', label: '环境体检', children: <EnvPanel projectId={detail.project.id}/> },
+            { key: 'config-check', label: '配置体检', children: <ConfigCheckPanel projectId={detail.project.id}/> },
             { key: 'archives', label: '运行档案', children: <ArchivesPanel projectId={detail.project.id}/> },
+            { key: 'git', label: 'Git', children: <GitPanel projectId={detail.project.id} repoPath={detail.project.root_path}/> },
           ]}/>
           <div style={{ marginTop: 18, display: 'flex', gap: 8 }}>{detail.project.analysis_status !== 'confirmed' && <Button type="primary" loading={busy(`confirm-${detail.project.id}`)} onClick={() => void confirmProject(detail.project.id)}>审阅无误，确认配置</Button>}<Button danger onClick={() => removeProject(detail.project)}>删除项目记录</Button></div>
         </>}
       </Drawer>
+
+      {/* 配置向导：启动前收集缺失的必填参数（API Key / 数据库密码等），验证通过才放行启动 */}
+      <Modal
+        open={!!wizard}
+        title={`启动配置 · ${wizard?.projectName ?? ''}`}
+        okText="保存并启动项目"
+        cancelText="稍后再说"
+        okButtonProps={{ loading: wizard?.busy }}
+        onOk={() => void submitWizard()}
+        onCancel={() => setWizard(null)}
+        width={560}
+      >
+        {wizard && (
+          <div style={{ display: 'grid', gap: 12 }}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              检测到本项目启动前需要以下必填配置（来自项目自身的 .env.example / 配置文件）。填写后系统会自动校验可用性并写入项目根目录 .env。
+              敏感项（🔒）不会回显，也不会出现在日志里。
+            </Typography.Text>
+            {wizard.fields.map((f) => (
+              <div key={f.key} style={{ display: 'grid', gap: 4 }}>
+                <div style={{ fontSize: 12 }}>
+                  <Mono>{f.key}</Mono>{f.sensitive ? ' 🔒' : ''}
+                  {f.component && <Typography.Text type="secondary" style={{ fontSize: 10, marginLeft: 6 }}>来自 {f.component}</Typography.Text>}
+                </div>
+                {f.sensitive || /PASSWORD|SECRET|KEY|TOKEN/.test(f.key.toUpperCase())
+                  ? <Input.Password size="small" placeholder={`请输入 ${f.key}`} value={wizard.values[f.key] ?? ''} onChange={(e) => setWizard((w) => (w ? { ...w, values: { ...w.values, [f.key]: e.target.value } } : w))}/>
+                  : <Input size="small" placeholder={`请输入 ${f.key}`} value={wizard.values[f.key] ?? ''} onChange={(e) => setWizard((w) => (w ? { ...w, values: { ...w.values, [f.key]: e.target.value } } : w))}/>}
+                {wizard.invalid[f.key] && <Typography.Text type="danger" style={{ fontSize: 11 }}>✗ {wizard.invalid[f.key]}</Typography.Text>}
+              </div>
+            ))}
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+}
+
+/* ---------- 项目 Git 面板（详情抽屉标签页）：状态/分支/提交，日常操作不再去独立页 ---------- */
+
+function GitPanel({ projectId, repoPath }: { projectId: string; repoPath: string }) {
+  const [st, setSt] = useState<any>(null);
+  const [branches, setBranches] = useState<string[]>([]);
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  const enc = (s: string) => encodeURIComponent(s);
+
+  const load = React.useCallback(async () => {
+    try {
+      const s = await api<any>(`/git/status?repoPath=${enc(repoPath)}`);
+      setSt(s);
+      if (s.isRepo) {
+        setBranches(await api<any[]>(`/git/branches?repoPath=${enc(repoPath)}`));
+        // 登记仓库到项目（push 白名单用）；已登记过则忽略
+        try { await api('/git/register', 'POST', { projectId, repoPath }); } catch { /* noop */ }
+      }
+    } catch {
+      // 瞬时失败静默：保留上次成功状态，8s 轮询自愈；
+      // 真宕机由工作台的整体错误状态呈现，不在这里刷 toast
+    }
+  }, [projectId, repoPath]);
+  useEffect(() => { void load(); const t = setInterval(load, 8000); return () => clearInterval(t); }, [load]);
+
+  if (!st) return <p className="dp-desc">加载中…</p>;
+  if (!st.isRepo) return <p className="dp-desc">该目录不是 Git 仓库（没有 .git），Git 功能不适用。</p>;
+
+  const commit = async () => {
+    if (!msg.trim()) { message.warning('先填写提交说明'); return; }
+    setBusy(true);
+    try {
+      const r = await api<any>('/git/commit', 'POST', { repoPath, message: msg, files: null });
+      if (r.pendingApproval) message.warning('提交需要审批，已生成审批单（批准后生效）');
+      else if (r.ok) message.success('已提交全部变更');
+      else message.info(r.output || '无变更可提交');
+      setMsg('');
+      await load();
+    } catch (e: any) { message.error('提交失败：' + (e?.message ?? String(e))); }
+    finally { setBusy(false); }
+  };
+  const switchBranch = async (branch: string) => {
+    if (!branch || branch === st.branch) return;
+    setBusy(true);
+    try {
+      const r = await api<any>('/git/checkout', 'POST', { repoPath, branch });
+      r.ok ? message.success(`已切换到 ${branch}`) : message.error(r.error ?? r.output ?? '切换失败（工作区有未提交修改时请先提交）');
+      await load();
+    } catch (e: any) { message.error('切换失败：' + (e?.message ?? String(e))); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+        <Select
+          size="small" style={{ minWidth: 180 }} value={st.branch} loading={busy}
+          onChange={(v) => void switchBranch(v)}
+          options={branches.map((b) => ({ value: b, label: b.replace(/^remotes\//, '').replace(/^(heads|origin)\//, '') }))}
+        />
+        <Tag color={st.clean ? 'green' : 'orange'}>{st.clean ? '工作区干净' : `${st.files.length} 处修改`}</Tag>
+        {st.aheadBehind?.length > 0 && <Tag color="blue">{st.aheadBehind.join(' ')}</Tag>}
+        <Button size="small" onClick={() => void load()}>刷新</Button>
+      </div>
+      {!st.clean && (
+        <div style={{ marginBottom: 12 }}>
+          {st.files.slice(0, 12).map((f: { status: string; path: string }) => (
+            <div key={f.path} className="dp-agent-kv" style={{ fontSize: 11 }}>
+              <span><Mono>{f.status}</Mono></span><strong className="dp-mono" title={f.path}>{f.path}</strong>
+            </div>
+          ))}
+          {st.files.length > 12 && <p className="dp-desc">…还有 {st.files.length - 12} 个文件</p>}
+          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+            <Input size="small" placeholder="提交说明（提交全部变更）" value={msg} onChange={(e) => setMsg(e.target.value)} onPressEnter={() => void commit()}/>
+            <Button size="small" type="primary" loading={busy} onClick={() => void commit()}>提交</Button>
+          </div>
+        </div>
+      )}
+      <div className="dp-agent-pane-title" style={{ padding: '4px 0 6px' }}><span>最近提交</span></div>
+      {st.recentCommits.slice(0, 5).map((line: string) => (
+        <div key={line} className="dp-agent-kv" style={{ fontSize: 11 }}><strong className="dp-mono">{line.slice(0, 7)}</strong><span title={line}>{line.slice(8, 90)}</span></div>
+      ))}
+      <p className="dp-desc" style={{ marginTop: 8 }}>更复杂的 Git 操作（revert / discard / 远程推送）在「高级模式 → Git」页面，或直接让 Agent 代办。</p>
     </div>
   );
 }
@@ -651,9 +971,68 @@ function ProfilePanel({ projectId }: { projectId: string }) {
   );
 }
 
-function EnvPanel({ projectId }: { projectId: string }) {
-  const [data, setData] = useState<{ match?: any; vars?: any; services?: any } | null>(null);
+/** 环境体检结果缓存：首次进入 tab 自动体检一次并缓存（真实执行 --version 要 10-30s）；
+ *  之后切 tab / 重开抽屉直接展示缓存，只有手动点「重新体检」才重新跑。 */
+const envCheckCache = new Map<string, { data: { match?: any; vars?: any; services?: any }; at: number }>();
+
+/**
+ * 配置体检：.env 完整性 / 占位符 / API Key 真实可用性 / 数据库连通 / 端口 / 启动命令可疑性。
+ * 导入时后端已自动跑一遍；这里可手动重跑（probe=1 会真实调用一次提供商接口）。
+ */
+function ConfigCheckPanel({ projectId }: { projectId: string }) {
+  const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async (probe = true) => {
+    setLoading(true);
+    try {
+      const r = await api<any>(`/projects/${projectId}/config-check${probe ? '' : '?probe=0'}`);
+      setData(r);
+      setError(null);
+    } catch (e: any) { setError(e?.message ?? String(e)); }
+    finally { setLoading(false); }
+  }, [projectId]);
+  useEffect(() => { void load(true); }, [load]);
+
+  if (loading) return <p className="dp-desc">正在校验配置（会真实调用一次 API Key 与数据库端口，约 2-8 秒）…</p>;
+  if (error) return <p className="dp-desc">配置体检失败：{error} <Button size="small" onClick={() => void load(true)}>重试</Button></p>;
+  if (!data) return null;
+
+  const tone: Record<string, 'green' | 'orange' | 'red' | 'default'> = { ok: 'green', warn: 'orange', fail: 'red', skip: 'default' };
+  const text: Record<string, string> = { ok: '通过', warn: '注意', fail: '不通过', skip: '跳过' };
+  const groups: Array<{ status: string; items: any[] }> = ['fail', 'warn', 'skip', 'ok'].map((status) => ({ status, items: (data.items ?? []).filter((i: any) => i.status === status) })).filter((g) => g.items.length);
+  return (
+    <div>
+      <div style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <StatusTag status={data.overall === 'ok' ? 'Completed' : data.overall === 'fail' ? 'Failed' : 'Pending'} text={data.overall === 'ok' ? '配置可用' : data.overall === 'fail' ? '配置有问题' : '配置可用但有风险'}/>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>检查时间 {String(data.checkedAt).replace('T', ' ').slice(0, 19)}</Typography.Text>
+        <Button size="small" onClick={() => void load(true)}>重新检查（含真实调用）</Button>
+        <Button size="small" onClick={() => void load(false)}>仅静态检查</Button>
+      </div>
+      {groups.map((g) => (
+        <div key={g.status} style={{ marginBottom: 12 }}>
+          <Typography.Text strong style={{ fontSize: 12 }}>{text[g.status]}（{g.items.length}）</Typography.Text>
+          {g.items.map((item: any) => (
+            <div key={item.id} style={{ marginTop: 6, padding: '6px 8px', borderLeft: `3px solid ${g.status === 'fail' ? '#ff4d4f' : g.status === 'warn' ? '#faad14' : '#d9d9d9'}`, background: 'rgba(0,0,0,0.02)' }}>
+              <Space size={6} wrap>
+                <Tag color={tone[g.status]}>{text[g.status]}</Tag>
+                <Typography.Text strong style={{ fontSize: 12 }}>{item.label}</Typography.Text>
+                <Typography.Text style={{ fontSize: 12 }}>{item.detail}</Typography.Text>
+              </Space>
+              {item.evidence && <div><Mono title={String(item.evidence)}>{String(item.evidence)}</Mono></div>}
+              {item.hint && <div><Typography.Text type="secondary" style={{ fontSize: 11 }}>建议：{item.hint}</Typography.Text></div>}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EnvPanel({ projectId }: { projectId: string }) {
+  const cached = envCheckCache.get(projectId);
+  const [data, setData] = useState<{ match?: any; vars?: any; services?: any } | null>(cached?.data ?? null);
+  const [loading, setLoading] = useState(!cached);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(async () => {
     setLoading(true);
@@ -663,18 +1042,26 @@ function EnvPanel({ projectId }: { projectId: string }) {
         api<any>(`/environments/env-vars/${projectId}`),
         api<any>(`/environments/services/${projectId}`),
       ]);
-      setData({ match, vars, services });
+      const fresh = { match, vars, services };
+      envCheckCache.set(projectId, { data: fresh, at: Date.now() });
+      setData(fresh);
       setError(null);
     } catch (e: any) { setError(e?.message ?? String(e)); }
     finally { setLoading(false); }
   }, [projectId]);
-  useEffect(() => { void load(); }, [load]);
+  // 仅首次（无缓存时）自动体检；有缓存直接展示，刷新交给手动按钮
+  const autoRan = useRef(!!cached);
+  useEffect(() => { if (!autoRan.current) { autoRan.current = true; void load(); } }, [load]);
   if (loading) return <p className="dp-desc">体检中…（真实执行 --version 验证，首次约需 10-30 秒）</p>;
   if (error) return <p className="dp-desc">体检失败：{error} <Button size="small" onClick={() => void load()}>重试</Button></p>;
   if (!data) return null;
+  const checkedAt = envCheckCache.get(projectId)?.at;
   return (
     <div>
-      <div style={{ marginBottom: 10 }}><Button size="small" onClick={() => void load()}>重新体检</Button></div>
+      <div style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <Button size="small" onClick={() => void load()}>重新体检</Button>
+        {checkedAt && <Typography.Text type="secondary" style={{ fontSize: 11 }}>上次体检：{formatTime(new Date(checkedAt).toISOString())}</Typography.Text>}
+      </div>
       {/* 版本匹配 */}
       <h4>版本匹配（项目要求 vs 本机多版本）</h4>
       {(data.match?.matches ?? []).length === 0 && <p className="dp-desc">项目组件未声明版本约束。</p>}
@@ -691,9 +1078,18 @@ function EnvPanel({ projectId }: { projectId: string }) {
       <h4 style={{ marginTop: 14 }}>环境变量（.env.example / application.yml）</h4>
       <p className="dp-desc">{data.vars?.note ?? `共 ${data.vars?.vars?.length ?? 0} 项需求，缺失 ${data.vars?.missing?.length ?? 0} 项（敏感值不回显，不自动生成密钥）`}</p>
       {(data.vars?.vars ?? []).map((v: any) => (
-        <div key={v.key} className="dp-agent-kv" style={{ fontSize: 12 }}>
-          <span><Mono>{v.key}</Mono>{v.sensitive ? ' 🔒' : ''}</span>
-          <strong>{v.status === 'provided' ? `已提供（${v.where}）` : v.status === 'default-available' ? '有默认值' : '缺失'}</strong>
+        // 专用行布局：key 可能很长（GEMINI_API_KEY 等），不能复用 dp-agent-kv 的 70px 标签列（会折行重叠）
+        <div key={v.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, margin: '6px 0', fontSize: 12 }}>
+          <span style={{ minWidth: 0, wordBreak: 'break-all', lineHeight: 1.5 }}>
+            <Mono>{v.key}</Mono>{v.sensitive ? ' 🔒' : ''}
+          </span>
+          <strong style={{ flex: 'none', fontWeight: 500 }}>
+            {v.status === 'provided'
+              ? <Tag color="green" style={{ margin: 0 }}>已提供（{v.where}）</Tag>
+              : v.status === 'default-available'
+                ? <Tag color="orange" style={{ margin: 0 }}>有默认值</Tag>
+                : <Tag color="red" style={{ margin: 0 }}>缺失</Tag>}
+          </strong>
         </div>
       ))}
       {/* 外部服务 */}

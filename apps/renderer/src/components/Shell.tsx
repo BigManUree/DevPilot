@@ -69,6 +69,9 @@ function UtilityIcon({ name }: { name: 'search' | 'sun' | 'moon' | 'system' | 's
 
 const GROUPS = ['工作区', '开发', '资源与工具'];
 const COLLAPSE_KEY = 'devpilot.siderCollapsed';
+const ADVANCED_KEY = 'devpilot.advancedMode';
+/** 小白默认模式只暴露三口之家：工作台 / Agent / 设置；高级模式解锁全部页面（能力不删，入口收敛） */
+const CORE_KEYS = new Set(['1', '17', '9']);
 const THEME_ITEMS: Array<{ key: ThemeMode; label: string; icon: 'system' | 'sun' | 'moon' }> = [
   { key: 'system', label: '跟随系统', icon: 'system' },
   { key: 'light', label: '浅色模式', icon: 'sun' },
@@ -88,7 +91,17 @@ export default function Shell({ page, onNavigate, children, themeMode, onThemeCh
   const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem(COLLAPSE_KEY) === '1'; } catch { return false; } });
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState('');
+  const [advanced, setAdvanced] = useState(() => { try { return localStorage.getItem(ADVANCED_KEY) === '1'; } catch { return false; } });
   const searchRef = useRef<any>(null);
+
+  // 设置页切换高级模式 → 广播事件，这里同步重读
+  useEffect(() => {
+    const sync = () => { try { setAdvanced(localStorage.getItem(ADVANCED_KEY) === '1'); } catch { /* noop */ } };
+    window.addEventListener('devpilot:advanced-changed', sync);
+    return () => window.removeEventListener('devpilot:advanced-changed', sync);
+  }, []);
+
+  const visiblePages = useMemo(() => (advanced ? PAGES : PAGES.filter((p) => CORE_KEYS.has(p.key))), [advanced]);
 
   const toggle = React.useCallback(() => setCollapsed((value) => {
     const next = !value;
@@ -109,9 +122,15 @@ export default function Shell({ page, onNavigate, children, themeMode, onThemeCh
 
   useEffect(() => {
     let alive = true;
+    let failStreak = 0; // 连续 2 次失败才标记未连接：启动重负载期的瞬时失败不翻红
     const check = async () => {
-      try { await api('/health'); if (alive) setHealth({ ok: true }); }
-      catch { if (alive) setHealth({ ok: false }); }
+      try {
+        await api('/health');
+        if (alive) { failStreak = 0; setHealth({ ok: true }); }
+      } catch {
+        failStreak += 1;
+        if (alive && failStreak >= 2) setHealth({ ok: false });
+      }
     };
     void check();
     const timer = setInterval(check, 30000);
@@ -120,14 +139,17 @@ export default function Shell({ page, onNavigate, children, themeMode, onThemeCh
 
   useEffect(() => { if (searchOpen) setTimeout(() => searchRef.current?.focus(), 60); }, [searchOpen]);
 
-  const menuItems = GROUPS.map((group) => ({
-    type: 'group' as const, key: group, label: group,
-    children: PAGES.filter((p) => p.group === group).map((p) => ({ key: p.key, label: <NavLabel page={p}/> })),
-  }));
+  const menuItems = GROUPS
+    .map((group) => ({ group, pages: visiblePages.filter((p) => p.group === group) }))
+    .filter(({ pages }) => pages.length > 0)
+    .map(({ group, pages }) => ({
+      type: 'group' as const, key: group, label: group,
+      children: pages.map((p) => ({ key: p.key, label: <NavLabel page={p}/> })),
+    }));
   const results = useMemo(() => {
     const keyword = search.trim().toLowerCase();
-    return PAGES.filter((p) => !keyword || `${p.label} ${p.desc} ${p.group}`.toLowerCase().includes(keyword));
-  }, [search]);
+    return visiblePages.filter((p) => !keyword || `${p.label} ${p.desc} ${p.group}`.toLowerCase().includes(keyword));
+  }, [search, visiblePages]);
   const themeIcon = THEME_ITEMS.find((item) => item.key === themeMode)?.icon ?? 'system';
 
   return (
@@ -140,11 +162,16 @@ export default function Shell({ page, onNavigate, children, themeMode, onThemeCh
               <path d="M21 2 12 13"/>
             </svg>
           </span>
-          {!collapsed && <span className="dp-brand-name">DevPilot</span>}
+          {!collapsed && (
+            <span className="dp-brand-name">
+              DevPilot
+              <span className="dp-brand-version" title={`DevPilot v${__APP_VERSION__}`}>{__APP_VERSION__}</span>
+            </span>
+          )}
         </button>
         {collapsed ? (
           <nav className="dp-compact-nav" aria-label="主导航">
-            {PAGES.filter((p) => p.key !== '9').map((p) => (
+            {visiblePages.filter((p) => p.key !== '9').map((p) => (
               <Tooltip key={p.key} title={`${p.group} · ${p.label}`} placement="right">
                 <button className={`dp-compact-item${p.key === page ? ' active' : ''}`} aria-label={p.label} aria-current={p.key === page ? 'page' : undefined} onClick={() => onNavigate(p.key)}><PageIcon k={p.key}/></button>
               </Tooltip>

@@ -18,9 +18,50 @@
         document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
       })();
     </script>
+    <!--
+      启动骨架：内联在 HTML 里，不依赖 JS/CSS 产物下载与解析，窗口一出就能画出第一帧。
+      React 挂载时 createRoot().render 会清空 #root 内的占位内容，替换成真实界面。
+    -->
+    <style>
+      html, body { margin: 0; height: 100%; }
+      body { background: #f5f6f8; }
+      html[data-theme='dark'] body { background: #14161a; }
+      #root { height: 100%; }
+      .dp-boot {
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+        color: #1f2937; background: inherit;
+      }
+      html[data-theme='dark'] .dp-boot { color: #e5e7eb; }
+      .dp-boot__box { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+      .dp-boot__logo {
+        width: 44px; height: 44px; border-radius: 12px;
+        background: linear-gradient(135deg, #2f6fed, #6aa6ff);
+        color: #fff; font-weight: 700; font-size: 18px; letter-spacing: .5px;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .dp-boot__title { font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+      .dp-boot__hint { font-size: 12px; color: #6b7280; }
+      html[data-theme='dark'] .dp-boot__hint { color: #9ca3af; }
+      .dp-boot__bar { width: 132px; height: 3px; border-radius: 999px; background: rgba(47,111,237,.15); overflow: hidden; }
+      .dp-boot__bar::after {
+        content: ''; display: block; width: 45%; height: 100%; border-radius: 999px; background: #2f6fed;
+        animation: dp-boot-slide 1.1s ease-in-out infinite;
+      }
+      @keyframes dp-boot-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(240%); } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="dp-boot">
+        <div class="dp-boot__box">
+          <div class="dp-boot__logo">DP</div>
+          <div class="dp-boot__title">DevPilot</div>
+          <div class="dp-boot__bar"></div>
+          <div class="dp-boot__hint">正在启动本地工作台…</div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

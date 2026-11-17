@@ -1,0 +1,46 @@
+{
+  "target": "C:\\Users\\administer\\WorkBuddy\\DevPilot\\apps\\desktop\\release\\win-unpacked\\DevPilot.exe",
+  "dir": null,
+  "at": "2026-11-17T04:28:22.220Z",
+  "rows": [
+    {
+      "run": 1,
+      "firstPaintMs": 743,
+      "windowShownMs": 381,
+      "backendReadyMs": 1310,
+      "apiReadyMs": 1371,
+      "didFinishLoadMs": 625,
+      "dashboardReadyMs": 1395,
+      "rssMb": 470
+    },
+    {
+      "run": 2,
+      "firstPaintMs": 792,
+      "windowShownMs": 389,
+      "backendReadyMs": 1392,
+      "apiReadyMs": 1449,
+      "didFinishLoadMs": 672,
+      "dashboardReadyMs": 1487,
+      "rssMb": 467
+    },
+    {
+      "run": 3,
+      "firstPaintMs": 803,
+      "windowShownMs": 417,
+      "backendReadyMs": 1388,
+      "apiReadyMs": 1466,
+      "didFinishLoadMs": 682,
+      "dashboardReadyMs": 1500,
+      "rssMb": 470
+    }
+  ],
+  "summary": {
+    "runs": 3,
+    "medianFirstPaintMs": 792,
+    "medianWindowShownMs": 389,
+    "medianBackendReadyMs": 1388,
+    "medianApiReadyMs": 1449,
+    "medianDashboardReadyMs": 1487,
+    "medianRssMb": 470
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "rows": [
+    {
+      "run": 1,
+      "uiReadyMs": 1603
+    },
+    {
+      "run": 2,
+      "uiReadyMs": 1704
+    }
+  ]
+}
